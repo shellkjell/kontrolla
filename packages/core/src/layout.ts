@@ -10,11 +10,15 @@ export const GROUP_PAD = 3;
 const GUTTER = 8; // between blocks (strips / sections)
 const ROW_MAX = 6; // items per row in a section without strips
 
-export type GeoKind = 'pot' | 'fader' | 'button' | 'encoder' | 'meter';
+export type GeoKind = 'pot' | 'fader' | 'button' | 'encoder' | 'meter' | 'port';
+const STRIP_MIN_W = 22; // a strip is never narrower than this (plus the gutter: ~30 mm pitch)
+const NUMBER_ROOM = 5; // extra top margin when strips carry a big channel number
+const WEDGE_DEG = 5; // slope of the top panel on long enclosures
 
 /** Absolute panel hole. circle: d. slot/rect: w (x extent) x h (y extent) after rotation. slot has rounded ends. */
 export interface Cutout {
   id: string;
+  face: 'top' | 'rear';
   shape: 'circle' | 'slot' | 'rect';
   x: number;
   y: number;
@@ -36,18 +40,26 @@ interface Geo {
   capSize: number; // finger-visible width
   cut: { shape: Cutout['shape']; w: number; h: number }; // d in w for circles
   rot: Placement['rotation'];
+  face: 'top' | 'rear';
 }
 
 const swap = (r: Placement['rotation']) => r === 90 || r === 270;
 
-function geoOf(spec: DeviceSpec, id: string, rot: Placement['rotation'] = 0): Geo | undefined {
+/** Things that need a hole but are not controls: the USB opening and the MIDI jack, both on the rear wall. */
+const virtualParts = (spec: DeviceSpec): Record<string, { part: string; label: string }> => ({
+  usb: { part: 'usb-micro-b', label: 'USB opening' },
+  ...(spec.midiPort ? { 'midi-port': { part: spec.midiPort.part, label: 'MIDI jack' } } : {}),
+});
+
+function geoOf(spec: DeviceSpec, id: string, rot: Placement['rotation'] = 0, face?: Placement['face']): Geo | undefined {
   const c = spec.controls.find((x) => x.id === id);
   const m = c ? undefined : spec.meters?.find((x) => x.id === id);
-  const part = PARTS[(c ?? m)?.part ?? ''];
+  const v = c || m ? undefined : virtualParts(spec)[id];
+  const part = PARTS[(c ?? m)?.part ?? v?.part ?? ''];
   const fp = part?.footprint;
   if (!part || !fp) return undefined;
-  const kind: GeoKind = c ? c.kind : 'meter';
-  const label = (c ?? m)?.label ?? id;
+  const kind: GeoKind = c ? c.kind : m ? 'meter' : 'port';
+  const label = (c ?? m)?.label ?? v?.label ?? id;
   const cap = fp.cap;
   let w = cap.shape === 'circle' ? cap.d : cap.w;
   let h = cap.shape === 'circle' ? cap.d : cap.h;
@@ -67,26 +79,27 @@ function geoOf(spec: DeviceSpec, id: string, rot: Placement['rotation'] = 0): Ge
     [w, h] = [h, w];
     cut = { ...cut, w: cut.h, h: cut.w };
   }
-  return { id, label, kind, part, fp, w, h, round, capSize, cut, rot };
+  return { id, label, kind, part, fp, w, h, round, capSize, cut, rot, face: face ?? (fp.face === 'rear' ? 'rear' : 'top') };
 }
 
-const allIds = (spec: DeviceSpec) => [...spec.controls.map((c) => c.id), ...(spec.meters ?? []).map((m) => m.id)];
+const allIds = (spec: DeviceSpec) => [...spec.controls.map((c) => c.id), ...(spec.meters ?? []).map((m) => m.id), ...Object.keys(virtualParts(spec))];
 
 function geos(spec: DeviceSpec): Geo[] {
   return allIds(spec).flatMap((id) => {
-    const g = geoOf(spec, id, spec.layout?.placements[id]?.rotation ?? 0);
+    const p = spec.layout?.placements[id];
+    const g = geoOf(spec, id, p?.rotation ?? 0, p?.face);
     return g ? [g] : [];
   });
 }
 
-/** Panel holes for every placed control/meter, in absolute panel mm (what the printer / drill template needs). */
-export function cutoutsOf(spec: DeviceSpec): Cutout[] {
+/** Holes for every placed control/meter/port on one face, in absolute mm (top: panel x/y; rear: x along the width, y up from the bottom of the rear wall). */
+export function cutoutsOf(spec: DeviceSpec, face: 'top' | 'rear' = 'top'): Cutout[] {
   const out: Cutout[] = [];
   for (const g of geos(spec)) {
     const p = spec.layout?.placements[g.id];
-    if (!p) continue;
-    if (g.cut.shape === 'circle') out.push({ id: g.id, shape: 'circle', x: p.x, y: p.y, d: g.cut.w });
-    else out.push({ id: g.id, shape: g.cut.shape, x: p.x, y: p.y, w: g.cut.w, h: g.cut.h });
+    if (!p || g.face !== face) continue;
+    if (g.cut.shape === 'circle') out.push({ id: g.id, face, shape: 'circle', x: p.x, y: p.y, d: g.cut.w });
+    else out.push({ id: g.id, face, shape: g.cut.shape, x: p.x, y: p.y, w: g.cut.w, h: g.cut.h });
   }
   return out;
 }
@@ -101,7 +114,7 @@ export interface Box {
 /** Occupancy box (cap sweep) of a placed control/meter, top-left origin. */
 export function boxOf(spec: DeviceSpec, id: string): Box | undefined {
   const p = spec.layout?.placements[id];
-  const g = p && geoOf(spec, id, p.rotation ?? 0);
+  const g = p && geoOf(spec, id, p.rotation ?? 0, p.face);
   return p && g ? { x: p.x - g.w / 2, y: p.y - g.h / 2, w: g.w, h: g.h } : undefined;
 }
 
@@ -135,7 +148,7 @@ function gap(a: Geo, ax: number, ay: number, b: Geo, bx: number, by: number): nu
   return Math.hypot(dx, dy) - c.w / 2;
 }
 
-const kindRank = (k: GeoKind) => (k === 'pot' || k === 'encoder' ? 0 : k === 'button' ? 1 : k === 'meter' ? 2 : 3);
+const kindRank = (k: GeoKind) => (k === 'pot' || k === 'encoder' ? 0 : k === 'button' ? 1 : k === 'meter' ? 2 : k === 'fader' ? 3 : 4);
 
 interface Block {
   items: Geo[];
@@ -147,10 +160,10 @@ interface Block {
 const rowGap = (a: Geo[], b: Geo[]) => Math.max(...a.flatMap((x) => b.map((y) => clearance(x, y))));
 
 /** Rows stacked top to bottom, each row centred; items inside a row sit side by side. */
-function stack(rows: Geo[][]): Block {
+function stack(rows: Geo[][], minW = 0): Block {
   const pos = new Map<string, { x: number; y: number }>();
   const rw = rows.map((r) => r.reduce((sum, it, k) => sum + it.w + (k ? clearance(r[k - 1]!, it) : 0), 0));
-  const w = Math.max(0, ...rw);
+  const w = Math.max(minW, ...rw);
   let y = 0;
   rows.forEach((row, ri) => {
     const rh = Math.max(...row.map((i) => i.h));
@@ -165,11 +178,15 @@ function stack(rows: Geo[][]): Block {
   return { items: rows.flat(), w, h: y, pos };
 }
 
-/** Consecutive meters (stereo pairs) share a row; everything else gets its own row. */
-const toRows = (items: Geo[]): Geo[][] =>
+/** Meters share a row, a fader joins the meters before it (the meter sits BESIDE the fader like on a real mixer),
+ *  and with buttonsPerRow buttons pair up (strips: two narrow rows of two). Everything else gets its own row. */
+const toRows = (items: Geo[], buttonsPerRow = 1): Geo[][] =>
   items.reduce<Geo[][]>((rows, it) => {
     const last = rows[rows.length - 1];
-    if (last && it.kind === 'meter' && last[0]!.kind === 'meter') last.push(it);
+    const kind = last?.[0]?.kind;
+    if (last && it.kind === 'meter' && kind === 'meter' && !last.some((g) => g.kind === 'fader')) last.push(it);
+    else if (last && it.kind === 'fader' && kind === 'meter' && !last.some((g) => g.kind === 'fader')) last.push(it);
+    else if (last && it.kind === 'button' && kind === 'button' && last.length < buttonsPerRow) last.push(it);
     else rows.push([it]);
     return rows;
   }, []);
@@ -214,29 +231,47 @@ function flow(items: Geo[], maxH: number | undefined): Block {
       x += it.w + (row[i + 1] ? clearance(it, row[i + 1]!) : 0);
     });
     w = Math.max(w, x);
-    y += rh + GUTTER;
+    y += rh + 2 * GUTTER - 4; // room for the next group's label
   }
-  return { items, w, h: Math.max(0, y - GUTTER), pos };
+  return { items, w, h: Math.max(0, y - (2 * GUTTER - 4)), pos };
 }
 
-/** Strips become columns left to right (pots/encoders, buttons, meter, fader nearest the player); everything else forms sections to the right. */
+const REAR_Y: Record<string, number> = { usb: 7.5, 'midi-port': 12 }; // above the bottom plate: USB lines up with the board's connector
+
+/** Left to right along the rear wall, starting at x0. Cutout y is measured up from the bottom edge of the rear wall. */
+function placeRear(items: Geo[], x0: number, thickness: number, out: Layout['placements']): void {
+  let x = x0;
+  for (const g of items) {
+    const y = thickness + (g.round && g.w > 15 ? 11 : (REAR_Y[g.id] ?? 12));
+    out[g.id] = { x: x + g.w / 2, y, face: 'rear' };
+    x += g.w + 12;
+  }
+}
+
+/** Strips become columns left to right (pots/encoders, buttons in pairs, meter beside the fader nearest the player);
+ *  everything else forms sections to the right. Strips get a big number on the panel. Rear parts (USB, MIDI jack) go on the rear wall.
+ *  Long panels slope down towards the player (wedge). */
 export function autoLayout(spec: DeviceSpec): Layout {
   const all = new Map(geos({ ...spec, layout: undefined }).map((g) => [g.id, g]));
+  const rear = [...all.values()].filter((g) => g.face === 'rear');
+  for (const g of rear) all.delete(g.id);
   const claimed = new Set<string>();
   const sorted = (ids: string[]) => ids.flatMap((id) => all.get(id) ?? []).sort((a, b) => kindRank(a.kind) - kindRank(b.kind));
   const groups = (spec.groups ?? []).map((g) => ({ g, items: sorted(g.members.filter((id) => !claimed.has(id) && claimed.add(id))) }));
   const strips = groups.filter((x) => x.g.kind === 'strip' && x.items.length);
   const rest = groups.filter((x) => x.g.kind !== 'strip' && x.items.length).map((x) => x.items);
-  const loose = sorted(allIds(spec).filter((id) => !claimed.has(id)));
+  const loose = sorted([...all.keys()].filter((id) => !claimed.has(id)));
   if (loose.length) rest.push(loose);
 
   const placements: Layout['placements'] = {};
   const place = (b: Block, ox: number, oy: number) => b.pos.forEach((p, id) => (placements[id] = { x: ox + p.x, y: oy + p.y }));
   let width = 0;
   let depth = 0;
-  const sBlocks = strips.map((s) => stack(s.items.map((i) => [i])));
+  const sBlocks = strips.map((s) => stack(toRows(s.items, 2), STRIP_MIN_W));
   let x = 0;
+  const stripX: number[] = [];
   for (const b of sBlocks) {
+    stripX.push(x + b.w / 2);
     place(b, x, 0);
     x += b.w + GUTTER;
     depth = Math.max(depth, b.h);
@@ -263,41 +298,66 @@ export function autoLayout(spec: DeviceSpec): Layout {
     depth = Math.max(0, ry - (2 * GUTTER - 4));
   }
 
-  for (const p of Object.values(placements)) ((p.x += MARGIN), (p.y += MARGIN));
+  const top = MARGIN + (strips.length ? NUMBER_ROOM : 0);
+  for (const p of Object.values(placements)) ((p.x += MARGIN), (p.y += top));
   const thickness = 3;
-  const maxBody = Math.max(0, ...[...all.values()].map((g) => g.fp.bodyDepth));
+  const annotations = (spec.layout?.annotations ?? []).filter((a) => !a.id.startsWith('num-'));
+  strips.forEach(({ g }, i) => {
+    const text = g.label.match(/\d+/g)?.pop() ?? String(i + 1);
+    const size = 8;
+    annotations.push({ id: `num-${g.id}`, kind: 'text', x: Math.round((MARGIN + stripX[i]! - 0.3 * size * text.length) * 10) / 10, y: top - GROUP_PAD - 4.5, text, size });
+  });
+
+  const panelDepth = Math.ceil(depth + top + MARGIN);
+  const panelWidth = Math.ceil(width + 2 * MARGIN);
+  const items = [...all.values()];
+  const maxBody = Math.max(0, ...items.map((g) => g.fp.bodyDepth));
+  const boardH = MCUS[spec.mcu].board.height;
+  let height = Math.ceil(2 * thickness + maxBody + boardH);
+  let frontHeight: number | undefined;
+  const drop = Math.min(30, Math.round(panelDepth * Math.sin((WEDGE_DEG * Math.PI) / 180)));
+  if (drop >= 3) {
+    // every part must clear the underside of the sloping panel: room(s) = height - 2t - drop * s / depth
+    const need = Math.max(2 * thickness + 15, ...items.map((g) => 2 * thickness + g.fp.bodyDepth + 3 + (drop * placements[g.id]!.y) / panelDepth));
+    height = Math.ceil(need);
+    frontHeight = height - drop;
+  }
+  placeRear(rear, MARGIN + 5, thickness, placements);
   return {
-    panel: {
-      width: Math.ceil(width + 2 * MARGIN),
-      depth: Math.ceil(depth + 2 * MARGIN),
-      height: Math.ceil(2 * thickness + maxBody + MCUS[spec.mcu].board.height),
-      thickness,
-      cornerRadius: 4,
-    },
+    panel: { width: Math.max(panelWidth, Math.ceil(MARGIN + 5 + rear.reduce((n, g) => n + g.w + 12, 0) + MARGIN - 12)), depth: panelDepth, height, ...(frontHeight !== undefined && { frontHeight }), thickness, cornerRadius: 4 },
     placements,
-    annotations: spec.layout?.annotations ?? [],
+    annotations,
   };
 }
 
-/** Fill only the missing placements: new items go in rows below everything already placed; the panel grows to fit. */
+/** Fill only the missing placements: new top-face items go in rows below everything already placed; the panel grows to fit. */
 export function ensureLayout(spec: DeviceSpec): DeviceSpec {
   if (!spec.layout) return { ...structuredClone(spec), layout: autoLayout(spec) };
   const out = structuredClone(spec);
   const lay = out.layout!;
-  const missing = geos(out).filter((g) => !lay.placements[g.id]).sort((a, b) => kindRank(a.kind) - kindRank(b.kind));
+  const missing = geos(out).filter((g) => !lay.placements[g.id]);
   if (!missing.length) return out;
+  const missTop = missing.filter((g) => g.face === 'top').sort((a, b) => kindRank(a.kind) - kindRank(b.kind));
   const placed = geos(out).filter((g) => lay.placements[g.id]);
-  const bottom = Math.max(MARGIN - GUTTER, ...placed.map((g) => lay.placements[g.id]!.y + g.h / 2));
-  const b = flow(missing, undefined);
-  b.pos.forEach((p, id) => (lay.placements[id] = { x: MARGIN + p.x, y: bottom + GUTTER + p.y }));
-  lay.panel.width = Math.max(lay.panel.width, Math.ceil(MARGIN * 2 + b.w));
-  lay.panel.depth = Math.max(lay.panel.depth, Math.ceil(bottom + GUTTER + b.h + MARGIN));
-  const body = Math.max(...missing.map((g) => g.fp.bodyDepth));
-  lay.panel.height = Math.max(lay.panel.height, Math.ceil(2 * lay.panel.thickness + body + MCUS[out.mcu].board.height));
+  if (missTop.length) {
+    const bottom = Math.max(MARGIN - GUTTER, ...placed.filter((g) => g.face === 'top').map((g) => lay.placements[g.id]!.y + g.h / 2));
+    const b = flow(missTop, undefined);
+    b.pos.forEach((p, id) => (lay.placements[id] = { x: MARGIN + p.x, y: bottom + GUTTER + p.y }));
+    lay.panel.width = Math.max(lay.panel.width, Math.ceil(MARGIN * 2 + b.w));
+    lay.panel.depth = Math.max(lay.panel.depth, Math.ceil(bottom + GUTTER + b.h + MARGIN));
+    const body = Math.max(...missTop.map((g) => g.fp.bodyDepth));
+    lay.panel.height = Math.max(lay.panel.height, Math.ceil(2 * lay.panel.thickness + body + MCUS[out.mcu].board.height + (lay.panel.height - (lay.panel.frontHeight ?? lay.panel.height))));
+  }
+  const missRear = missing.filter((g) => g.face === 'rear');
+  if (missRear.length) {
+    const right = Math.max(MARGIN - 7, ...placed.filter((g) => g.face === 'rear').map((g) => lay.placements[g.id]!.x + g.w / 2 + 12));
+    placeRear(missRear, right, lay.panel.thickness, lay.placements);
+    lay.panel.width = Math.max(lay.panel.width, Math.ceil(Math.max(...missRear.map((g) => lay.placements[g.id]!.x + g.w / 2)) + MARGIN));
+  }
   return out;
 }
 
-const KIND_NOUN: Record<GeoKind, string> = { pot: 'Knobs', encoder: 'Knobs', button: 'Buttons', fader: 'Faders', meter: 'Meters' };
+const KIND_NOUN: Record<GeoKind, string> = { pot: 'Knobs', encoder: 'Knobs', button: 'Buttons', fader: 'Faders', meter: 'Meters', port: 'Openings' };
 
 export function validateLayout(spec: DeviceSpec): Issue[] {
   const out: Issue[] = [];
@@ -316,9 +376,10 @@ export function validateLayout(spec: DeviceSpec): Issue[] {
     for (let j = i + 1; j < placed.length; j++) {
       const a = placed[i]!;
       const b = placed[j]!;
+      if (a.face !== b.face) continue;
       const d = gap(a, at(a).x, at(a).y, b, at(b).x, at(b).y);
       if (d < -1e-6)
-        add('error', `${a.label} and ${b.label} overlap on the panel`, a.id, 'Move one of them apart');
+        add('error', `${a.label} and ${b.label} overlap on the ${a.face === 'rear' ? 'rear wall' : 'panel'}`, a.id, 'Move one of them apart');
       else {
         const need = clearance(a, b);
         if (d < need - 0.01) {
@@ -328,23 +389,33 @@ export function validateLayout(spec: DeviceSpec): Issue[] {
       }
     }
 
-  const { width, depth, height, thickness } = lay.panel;
-  for (const c of cutoutsOf(spec)) {
-    const g = placed.find((x) => x.id === c.id)!;
-    const hw = (c.d ?? c.w!) / 2;
-    const hh = (c.d ?? c.h!) / 2;
-    const left = c.x - hw;
-    const right = width - (c.x + hw);
-    const top = c.y - hh;
-    const bottom = depth - (c.y + hh);
-    if (Math.min(left, right, top, bottom) < 0) add('error', `${g.label}'s hole sticks out past the edge of the panel`, c.id, 'Move it inside the panel or make the panel bigger');
-    else if (Math.min(left, right, top, bottom) < EDGE_MIN)
-      add('error', `${g.label}'s hole is less than ${EDGE_MIN} mm from the panel edge; the panel would crack or print thin`, c.id, 'Move it inward or make the panel bigger');
-  }
+  const { width, depth, height, thickness, frontHeight } = lay.panel;
+  const drop = frontHeight === undefined ? 0 : height - frontHeight;
+  if (drop > 0 && drop >= depth) add('error', `The slope drops ${drop} mm but the panel is only ${depth} mm deep`, undefined, 'Make the panel deeper or the front taller');
+  const checkEdge = (face: 'top' | 'rear') => {
+    // top: the whole panel; rear: the wall between the two plates
+    const [x0, x1, y0, y1] = face === 'top' ? [0, width, 0, depth] : [0, width, thickness + 2, height - thickness - 2];
+    const where = face === 'top' ? 'panel' : 'rear wall';
+    for (const c of cutoutsOf(spec, face)) {
+      const g = placed.find((x) => x.id === c.id)!;
+      const hw = (c.d ?? c.w!) / 2;
+      const hh = (c.d ?? c.h!) / 2;
+      const m = Math.min(c.x - hw - x0, x1 - (c.x + hw), c.y - hh - y0, y1 - (c.y + hh));
+      if (m < 0) add('error', `${g.label}'s hole sticks out past the edge of the ${where}`, c.id, `Move it inside the ${where}${face === 'top' ? ' or make the panel bigger' : ''}`);
+      else if (face === 'top' && m < EDGE_MIN)
+        add('error', `${g.label}'s hole is less than ${EDGE_MIN} mm from the panel edge; the panel would crack or print thin`, c.id, 'Move it inward or make the panel bigger');
+      else if (face === 'rear' && Math.min(c.x - hw - x0, x1 - (c.x + hw)) < EDGE_MIN)
+        add('error', `${g.label}'s hole is less than ${EDGE_MIN} mm from the corner of the rear wall`, c.id, 'Move it inward');
+    }
+  };
+  checkEdge('top');
+  checkEdge('rear');
 
-  const room = height - 2 * thickness;
-  for (const g of placed)
-    if (g.fp.bodyDepth > room) add('warning', `${g.label} is ${g.fp.bodyDepth} mm deep but the enclosure only has ${room} mm inside`, g.id, 'Make the enclosure taller');
+  for (const g of placed) {
+    if (g.face !== 'top') continue;
+    const room = height - 2 * thickness - (drop * at(g).y) / depth;
+    if (g.fp.bodyDepth > room) add('warning', `${g.label} is ${g.fp.bodyDepth} mm deep but the enclosure only has ${Math.floor(room)} mm inside at that spot`, g.id, 'Make the enclosure taller');
+  }
 
   for (const grp of spec.groups ?? []) {
     const m = grp.members.flatMap((id) => placed.find((g) => g.id === id) ?? []);

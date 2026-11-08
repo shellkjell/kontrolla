@@ -108,6 +108,8 @@ export interface Placement {
   x: number;
   y: number;
   rotation?: 0 | 90 | 180 | 270;
+  /** Which face the part is mounted on (default 'top'). Rear: x along the width (as seen from above), y up from the bottom edge of the rear wall. */
+  face?: 'top' | 'rear';
 }
 
 /** Free sketch / silkscreen marks on the panel (mm). */
@@ -117,7 +119,7 @@ export type Annotation =
   | { id: string; kind: 'rect'; x: number; y: number; w: number; h: number };
 
 export interface Layout {
-  panel: { width: number; depth: number; height: number; thickness: number; cornerRadius: number }; // mm; height = enclosure height
+  panel: { width: number; depth: number; height: number; frontHeight?: number; thickness: number; cornerRadius: number }; // mm; height = enclosure height (rear height when frontHeight is set: the top panel slopes down to frontHeight at the player's edge; depth is then measured along the slope)
   placements: Record<string, Placement>; // by control/meter id
   annotations: Annotation[];
 }

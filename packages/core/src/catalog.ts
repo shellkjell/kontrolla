@@ -14,7 +14,7 @@ export interface McuPart {
   notes: string[];
 }
 
-export type PartCategory = 'analog' | 'button' | 'encoder' | 'mux' | 'led' | 'meter';
+export type PartCategory = 'analog' | 'button' | 'encoder' | 'mux' | 'led' | 'meter' | 'port';
 
 /** What the player sees on top of the panel. All sizes in mm; w = x extent, h/l = y extent in the part's natural (rotation 0) orientation. */
 export type CapShape = { shape: 'circle'; d: number } | { shape: 'rect'; w: number; h: number };
@@ -27,6 +27,7 @@ export interface Footprint {
   heightAbove: number; // top of the cap above the panel surface
   bodyDepth: number; // part body below the panel underside (incl. solder lugs)
   minPitch: number; // centre-to-centre distance to a same-type neighbour before fingers collide
+  face?: 'rear'; // mounted on the rear wall instead of the top panel (default: top)
   segmentPitch?: number; // meters: centre-to-centre of segments along y
 }
 
@@ -107,6 +108,18 @@ export const PARTS: Record<string, Part> = {
     // 45 mm travel: slot ~2.5 x 47 mm, same cap as the 60 mm.
     footprint: { cap: { shape: 'rect', w: 10, h: 20 }, cutout: { shape: 'slot', w: 2.5, l: 47 }, heightAbove: 15, bodyDepth: 12, minPitch: 16 },
     wiring: ['Outer pins -> GND and 3V3, middle pin (wiper) -> analog pin.', 'Swap the outer pins to flip direction.'],
+  },
+  'pot-b10k-detent': {
+    id: 'pot-b10k-detent',
+    category: 'analog',
+    name: 'Rotary potentiometer 10k linear, centre detent',
+    partNumber: 'Alpha RV16AF-41-15R1-B10K, centre-detent version', // check the exact suffix in the shop: search "RV16 centre detent 10k linear"
+    datasheet: 'https://www.alphapotentiometers.com/',
+    currentMa: 0.33,
+    priceUsd: 2.2,
+    // Same mounting as the RV16. The click at 12 o'clock marks neutral: EQ flat, filter off, pan centred.
+    footprint: { cap: { shape: 'circle', d: 15 }, cutout: { shape: 'circle', d: 7 }, heightAbove: 20, bodyDepth: 20, minPitch: 20 },
+    wiring: ['Left pin -> GND, right pin -> 3V3, middle pin (wiper) -> analog pin.', 'The detent sits at the electrical centre (about 64 of 127).'],
   },
   'button-tact-6mm': {
     id: 'button-tact-6mm',
@@ -207,6 +220,49 @@ export const PARTS: Record<string, Part> = {
       'LEDs run on 5 V (VBUS), data from the Pico is 3.3 V: use a 74AHCT125 level shifter on the data line for reliability.',
       'Add a 1000 uF capacitor across 5 V / GND near the first LED.',
     ],
+  },
+  'midi-trs-a': {
+    id: 'midi-trs-a',
+    category: 'port',
+    name: '3.5 mm TRS MIDI jack (Type A)',
+    partNumber: 'CUI SJ1-3523N',
+    datasheet: 'https://www.cuidevices.com/product/resource/sj1-352x-series.pdf',
+    currentMa: 0,
+    priceUsd: 1.2,
+    // Panel-mount 3.5 mm stereo jack on the REAR wall: 6.2 mm hole, ~10 mm nut.
+    footprint: { cap: { shape: 'circle', d: 10 }, cutout: { shape: 'circle', d: 6.2 }, heightAbove: 4, bodyDepth: 14, minPitch: 14, face: 'rear' },
+    wiring: [
+      'Type A: Tip = DIN pin 5, Ring = DIN pin 4, Sleeve = shield/GND.',
+      'Out (3.3 V): 3V3 -> 220 ohm -> Ring; UART TX GPIO -> 220 ohm -> Tip. About 5 mA flows when TX is low.',
+      'In (optional): Tip -> 220 ohm -> opto LED anode, Ring -> LED cathode, 1N4148 across the LED the other way. Use an H11L1 (works on 3.3 V) or a 6N138 (needs 5 V and a pull-up to 3V3); opto output -> UART RX with a pull-up to 3V3.',
+    ],
+  },
+  'midi-din5': {
+    id: 'midi-din5',
+    category: 'port',
+    name: '5-pin DIN MIDI socket',
+    partNumber: 'CUI SDS-50J',
+    datasheet: 'https://www.cuidevices.com/product/resource/sds-50j.pdf',
+    currentMa: 0,
+    priceUsd: 1.5,
+    // 15.5 mm hole plus two screws; flange ~20 mm.
+    footprint: { cap: { shape: 'circle', d: 20 }, cutout: { shape: 'circle', d: 15.5 }, heightAbove: 2, bodyDepth: 18, minPitch: 25, face: 'rear' },
+    wiring: [
+      'Out: DIN pin 4 -> 220 ohm -> 3V3, DIN pin 5 -> 220 ohm -> UART TX GPIO, DIN pin 2 -> GND (shield).',
+      'In (optional): pin 4 -> 220 ohm -> opto LED anode, pin 5 -> LED cathode, 1N4148 across the LED the other way; H11L1 (3.3 V) or 6N138 (5 V). Opto output -> UART RX with a pull-up to 3V3.',
+    ],
+  },
+  'usb-micro-b': {
+    id: 'usb-micro-b',
+    category: 'port',
+    name: 'USB opening in the rear wall',
+    partNumber: '(on the board)',
+    datasheet: 'https://datasheets.raspberrypi.com/pico/pico-datasheet.pdf',
+    currentMa: 0,
+    priceUsd: 0,
+    // Opening for a micro-B plug with some play (overmould ~11 x 7 mm).
+    footprint: { cap: { shape: 'rect', w: 11, h: 7 }, cutout: { shape: 'rect', w: 11, h: 7 }, heightAbove: 0, bodyDepth: 0, minPitch: 12, face: 'rear' },
+    wiring: ['No wiring: the connector is on the Pico / Teensy. Line the opening up with it.'],
   },
   'mux-74hc4067': {
     id: 'mux-74hc4067',

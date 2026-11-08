@@ -7,7 +7,7 @@ test('starter allocates clean (4th pot forces a mux: Pico has 3 ADC pins)', () =
   const s = allocatePins(EXAMPLES.starter!);
   expect(problems(s)).toEqual([]);
   expect(s.muxes.length).toBe(1);
-  expect(encodeConfig(s).length).toBe(52 + 8 + 20 * 8 + 4);
+  expect(encodeConfig(s).length).toBe(52 + 8 + 8 + 20 * 8 + 4);
   expect(bom(s).wiring.length).toBe(9);
 });
 

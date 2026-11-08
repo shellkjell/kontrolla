@@ -15,8 +15,10 @@ test('drillTemplateSvg: true scale and a circle per round cutout', () => {
   const svg = drillTemplateSvg(spec);
   const p = spec.layout!.panel;
   expect(svg).toContain(`width="${p.width}mm"`);
-  expect(svg).toContain(`height="${p.depth}mm"`);
-  const round = cutoutsOf(spec).filter((c) => c.shape === 'circle').length;
+  // top section, a gap, then the rear wall section
+  expect(svg).toContain(`height="${p.depth + 16 + p.height - 2 * p.thickness}mm"`);
+  expect(svg).toContain('Rear wall, seen from outside');
+  const round = [...cutoutsOf(spec), ...cutoutsOf(spec, 'rear')].filter((c) => c.shape === 'circle').length;
   expect(round).toBeGreaterThan(30);
   expect(svg.match(/<circle /g)!.length).toBe(round);
 });
@@ -39,8 +41,8 @@ test('buildEnclosure names objects by control id; live updates', () => {
 test('every path point and rect in the drill SVG stays inside the panel', () => {
   for (const [name, ex] of Object.entries(EXAMPLES)) {
     const s = allocatePins(ex);
-    const { width: W, depth: D } = s.layout!.panel;
     const svg = drillTemplateSvg(s);
+    const [W, D] = svg.match(/viewBox="0 0 ([\d.]+) ([\d.]+)"/)!.slice(1, 3).map(Number) as [number, number];
     const ok = (x: number, y: number) => x >= 0 && y >= 0 && x <= W && y <= D;
     for (const m of svg.matchAll(/<path d="([^"]+)"/g)) {
       let x = 0;
@@ -64,4 +66,28 @@ test('stereo master meters sit side by side', () => {
   const p = spec.layout!.placements;
   expect(p['master-meter-l']!.y).toBe(p['master-meter-r']!.y);
   expect(p['master-meter-r']!.x).toBeGreaterThan(p['master-meter-l']!.x);
+});
+
+test('wedge: top surface tilts by asin(drop / depth), rear plate and MIDI jack exist', () => {
+  const p = spec.layout!.panel;
+  expect(p.frontHeight).toBeLessThan(p.height);
+  const g = buildEnclosure(spec);
+  const surf = g.getObjectByName('controls-surface')!;
+  expect(surf.rotation.x).toBeCloseTo(Math.asin((p.height - p.frontHeight!) / p.depth), 6);
+  expect(g.getObjectByName('rear-plate')).toBeDefined();
+  expect(g.getObjectByName('midi-port')).toBeDefined();
+});
+
+test('rear holes: USB opening and MIDI jack are on the rear section of the template', () => {
+  const rear = cutoutsOf(spec, 'rear').map((c) => c.id).sort();
+  expect(rear).toEqual(['midi-port', 'usb']);
+  expect(cutoutsOf(spec).some((c) => c.face === 'rear')).toBe(false);
+});
+
+test('flat enclosures (no wedge) still export', () => {
+  const flat = structuredClone(allocatePins(EXAMPLES.starter!));
+  delete flat.layout!.panel.frontHeight;
+  const stl = exportStl(flat);
+  const n = new DataView(stl.buffer, stl.byteOffset).getUint32(80, true);
+  expect(stl.length).toBe(84 + 50 * n);
 });

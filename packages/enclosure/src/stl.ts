@@ -1,25 +1,33 @@
 import type * as THREE from 'three';
 import { cutoutsOf, ensureLayout } from '@kontrolla/core';
 import type { DeviceSpec } from '@kontrolla/core';
-import { bottomGeometry, topPanelGeometry, wallsGeometry } from './geometry';
+import { bottomGeometry, planDepth, rearPlateGeometry, topPanelGeometry, wallsGeometry } from './geometry';
 
-/** Binary STL of the printable parts (top panel with holes, wall ring, bottom plate), each flat on the bed, side by side
- *  along x with a 10 mm gap, ready to be split in the slicer. Top panel is printed face-up. No knobs or caps. */
+/** Binary STL of the printable parts (top panel with holes, walls, rear plate with holes, bottom plate), each flat on the bed,
+ *  side by side along x with a 10 mm gap, ready to be split in the slicer. The top panel is printed face-up; with a wedge the
+ *  walls are cut to the slope. No knobs or caps. */
 export function exportStl(input: DeviceSpec): Uint8Array {
   const spec = ensureLayout(input);
   const panel = spec.layout!.panel;
-  const parts: [THREE.BufferGeometry, number][] = [
-    [topPanelGeometry(panel, cutoutsOf(spec), true), 0],
-    [wallsGeometry(panel), panel.width + 10],
-    [bottomGeometry(panel), 2 * (panel.width + 10)],
+  const walls = wallsGeometry(panel);
+  // print the walls upright: the sloped top edge up (a proper rotation, so triangle winding stays outward)
+  walls.rotateX(Math.PI);
+  walls.translate(0, planDepth(panel), panel.height - 2 * panel.thickness);
+  const parts: THREE.BufferGeometry[] = [
+    topPanelGeometry(panel, cutoutsOf(spec), true),
+    walls,
+    rearPlateGeometry(panel, cutoutsOf(spec, 'rear')),
+    bottomGeometry(panel),
   ];
-  const tris = parts.map(([g]) => g.getAttribute('position').count / 3);
-  const buf = new ArrayBuffer(84 + 50 * tris.reduce((a, b) => a + b, 0));
+  const tris = parts.map((g) => g.getAttribute('position').count / 3);
+  const total = tris.reduce((a, b) => a + b, 0);
+  const buf = new ArrayBuffer(84 + 50 * total);
   const dv = new DataView(buf);
   new TextEncoder().encodeInto('kont.rolla enclosure', new Uint8Array(buf, 0, 80));
-  dv.setUint32(80, tris.reduce((a, b) => a + b, 0), true);
+  dv.setUint32(80, total, true);
   let o = 84;
-  parts.forEach(([g, dx]) => {
+  parts.forEach((g, gi) => {
+    const dx = gi * (panel.width + 10);
     const g2 = g.index ? g.toNonIndexed() : g;
     const pos = g2.getAttribute('position');
     for (let t = 0; t < pos.count; t += 3) {

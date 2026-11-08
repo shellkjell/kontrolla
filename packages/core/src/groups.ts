@@ -160,6 +160,8 @@ export function duplicateGroup(input: DeviceSpec, groupId: string, times = 1): D
         if (p) spec.layout.placements[to] = { ...p, x: p.x + dx };
       }
       spec.layout.panel.width = Math.max(spec.layout.panel.width, Math.ceil(box.x + box.w + dx + MARGIN));
+      const num = spec.layout.annotations.find((a) => a.id === `num-${src.id}`);
+      if (num?.kind === 'text') spec.layout.annotations.push({ ...num, id: `num-${copy.id}`, x: num.x + dx, text: bump(num.text, delta) ?? num.text });
     }
   }
   return allocateLeds(spec);

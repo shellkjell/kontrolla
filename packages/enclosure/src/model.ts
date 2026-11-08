@@ -2,7 +2,7 @@
 import * as THREE from 'three';
 import { GROUP_PAD, MCUS, PARTS, cutoutsOf, ensureLayout, groupBBox } from '@kontrolla/core';
 import type { DeviceSpec } from '@kontrolla/core';
-import { bottomGeometry, topPanelGeometry, wallsGeometry } from './geometry';
+import { bottomGeometry, planDepth, rearPlateGeometry, slopeAngle, topPanelGeometry, wallsGeometry } from './geometry';
 
 export interface EnclosureOptions {
   /** 0..1: spreads the layers (bottom, board, walls, top, controls) apart vertically. */
@@ -19,11 +19,14 @@ const mesh = (g: THREE.BufferGeometry, m: THREE.Material, id: string, name: stri
 const LAYER_LIFT: Record<string, number> = { bottom: -30, board: -15, walls: 0, top: 25, frames: 25, controls: 50 };
 const meterColor = (i: number, n: number) => (i / n < 0.6 ? '#22cc55' : i / n < 0.85 ? '#ddcc22' : '#ee3333');
 
-/** Builds the enclosure. Meshes carry userData.controlId; objects are named by control id (`id`, `id/cap`, `id/knob`, `id/segN`). */
+/** Builds the enclosure. Meshes carry userData.controlId; objects are named by control id (`id`, `id/cap`, `id/knob`, `id/segN`).
+ *  Top-face parts live in a `surface` group inside the `controls` layer (tilted when the panel slopes). */
 export function buildEnclosure(input: DeviceSpec, opts: EnclosureOptions = {}): THREE.Group {
   const spec = ensureLayout(input);
   const lay = spec.layout!;
-  const { width: W, depth: D, height: H, thickness: t } = lay.panel;
+  const { width: W, height: H, thickness: t } = lay.panel;
+  const D = planDepth(lay.panel);
+  const theta = slopeAngle(lay.panel);
   const root = new THREE.Group();
   root.name = 'enclosure';
   const model = new THREE.Group();
@@ -43,45 +46,78 @@ export function buildEnclosure(input: DeviceSpec, opts: EnclosureOptions = {}): 
   const board = layer('board');
   const frames = layer('frames');
   const controls = layer('controls');
+  const surface = (parent: THREE.Group) => {
+    const s = new THREE.Group();
+    s.name = `${parent.name}-surface`;
+    s.position.y = H;
+    s.rotation.x = theta; // local z runs down the slope, local y is the panel normal
+    parent.add(s);
+    return s;
+  };
+  const ctlSurface = surface(controls);
+  const frameSurface = surface(frames);
 
   // printable shells: shape (x, y) -> world (x, ., z); extrusion +z -> world -y
-  const place = (g: THREE.BufferGeometry, y: number, m: THREE.Material, name: string) => {
-    g.rotateX(Math.PI / 2);
+  const shell = (g: THREE.BufferGeometry, y: number, m: THREE.Material, name: string, rot = Math.PI / 2) => {
+    g.rotateX(rot);
     const x = new THREE.Mesh(g, m);
     x.name = name;
     x.position.y = y;
     return x;
   };
-  top.add(place(topPanelGeometry(lay.panel, cutoutsOf(spec)), H, std('#2b2f36'), 'top-panel'));
-  walls.add(place(wallsGeometry(lay.panel), H - t, std('#23262c'), 'walls'));
-  bottom.add(place(bottomGeometry(lay.panel), t, std('#1c1e23'), 'bottom-plate'));
+  top.add(shell(topPanelGeometry(lay.panel, cutoutsOf(spec)), H, std('#2b2f36'), 'top-panel', Math.PI / 2 + theta));
+  walls.add(shell(wallsGeometry(lay.panel), H - t, std('#23262c'), 'walls'));
+  bottom.add(shell(bottomGeometry(lay.panel), t, std('#1c1e23'), 'bottom-plate'));
+  const rear = cutoutsOf(spec, 'rear');
+  const rearMesh = new THREE.Mesh(rearPlateGeometry(lay.panel, rear), std('#262a31'));
+  rearMesh.name = 'rear-plate';
+  rearMesh.position.y = t;
+  walls.add(rearMesh);
 
-  // Pico / Teensy board resting on standoffs at the back, USB end towards the back wall
+  // Pico / Teensy board on standoffs at the back; its USB connector lines up with the rear opening
   const b = MCUS[spec.mcu].board;
+  const usb = lay.placements.usb;
   const bg = new THREE.Group();
   bg.name = 'mcu-board';
-  bg.position.set(W / 2, t + 3, 2 * t + b.l / 2);
+  bg.position.set(usb?.x ?? W / 2, (usb?.y ?? t + 7.5) - 2.3, 2.5 + b.l / 2);
   bg.add(new THREE.Mesh(new THREE.BoxGeometry(b.w, 1.6, b.l), std('#1f7a3a')));
-  const usb = new THREE.Mesh(new THREE.BoxGeometry(8, 3, 6), std('#b8bcc2', { metalness: 0.8 }));
-  usb.position.set(0, 2.3, -b.l / 2 + 1);
-  bg.add(usb);
+  const conn = new THREE.Mesh(new THREE.BoxGeometry(8, 3, 6), std('#b8bcc2', { metalness: 0.8 }));
+  conn.position.set(0, 2.3, -b.l / 2 + 1);
+  bg.add(conn);
   board.add(bg);
+
+  // rear-wall hardware: MIDI jack / DIN socket nut outside, body inside
+  const midi = spec.midiPort && lay.placements['midi-port'];
+  const midiFp = spec.midiPort && PARTS[spec.midiPort.part]?.footprint;
+  if (midi && midiFp && midiFp.cap.shape === 'circle') {
+    const jack = tag(new THREE.Group(), 'midi-port', 'midi-port');
+    jack.position.set(midi.x, midi.y, 0);
+    const nut = mesh(new THREE.CylinderGeometry(midiFp.cap.d / 2, midiFp.cap.d / 2, midiFp.heightAbove, 24), std('#b8bcc2', { metalness: 0.8 }), 'midi-port', 'midi-port/nut');
+    nut.rotation.x = Math.PI / 2;
+    nut.position.z = -midiFp.heightAbove / 2;
+    const body = mesh(new THREE.BoxGeometry(10, 10, midiFp.bodyDepth), std('#1a1c20'), 'midi-port', 'midi-port/body');
+    body.position.z = t + midiFp.bodyDepth / 2;
+    jack.add(nut, body);
+    walls.add(jack);
+  }
 
   for (const g of spec.groups ?? []) {
     const bb = groupBBox(spec, g.id, GROUP_PAD);
     if (!bb) continue;
-    const pts = [[bb.x, bb.y], [bb.x + bb.w, bb.y], [bb.x + bb.w, bb.y + bb.h], [bb.x, bb.y + bb.h]].map(([x, z]) => new THREE.Vector3(x, H + 0.1, z));
+    const pts = [[bb.x, bb.y], [bb.x + bb.w, bb.y], [bb.x + bb.w, bb.y + bb.h], [bb.x, bb.y + bb.h]].map(([x, z]) => new THREE.Vector3(x, 0.1, z));
     const line = new THREE.LineLoop(new THREE.BufferGeometry().setFromPoints(pts), new THREE.LineBasicMaterial({ color: g.color ?? '#888888' }));
     line.name = `group:${g.id}`;
-    frames.add(line);
+    frameSurface.add(line);
   }
+  const silk = silkscreen(spec);
+  if (silk) frameSurface.add(silk);
 
   for (const c of spec.controls) {
     const p = lay.placements[c.id];
     const fp = PARTS[c.part]?.footprint;
-    if (!p || !fp) continue;
+    if (!p || !fp || p.face === 'rear') continue;
     const grp = tag(new THREE.Group(), c.id, c.id);
-    grp.position.set(p.x, H, p.y);
+    grp.position.set(p.x, 0, p.y);
     grp.rotation.y = (-(p.rotation ?? 0) * Math.PI) / 180;
     const capW = fp.cap.shape === 'circle' ? fp.cap.d : fp.cap.w;
     const capL = fp.cap.shape === 'circle' ? fp.cap.d : fp.cap.h;
@@ -105,7 +141,7 @@ export function buildEnclosure(input: DeviceSpec, opts: EnclosureOptions = {}): 
       const geo = fp.cap.shape === 'circle' ? new THREE.CylinderGeometry(fp.cap.d / 2, fp.cap.d / 2, h, 32) : new THREE.BoxGeometry(fp.cap.w, h, fp.cap.h);
       grp.add(mesh(geo, mat, c.id, `${c.id}/cap`, fp.heightAbove - h / 2));
     }
-    controls.add(grp);
+    ctlSurface.add(grp);
   }
 
   for (const m of spec.meters ?? []) {
@@ -115,16 +151,50 @@ export function buildEnclosure(input: DeviceSpec, opts: EnclosureOptions = {}): 
     const pitch = fp.segmentPitch ?? 5;
     const rot = p.rotation ?? 0;
     const grp = tag(new THREE.Group(), m.id, m.id);
-    grp.position.set(p.x, H, p.y);
+    grp.position.set(p.x, 0, p.y);
     grp.rotation.y = (-rot * Math.PI) / 180;
     for (let i = 0; i < m.ledCount; i++) {
       const seg = mesh(new THREE.BoxGeometry(fp.cap.w - 1.5, 0.8, pitch - 1.5), std('#101214', { emissive: '#000000' }), m.id, `${m.id}/seg${i}`, 0.2);
       seg.position.z = (m.ledCount * pitch) / 2 - (i + 0.5) * pitch; // segment 0 = lowest level = nearest the player
       grp.add(seg);
     }
-    controls.add(grp);
+    ctlSurface.add(grp);
   }
   return root;
+}
+
+/** Silkscreen layer (group labels and annotation text) as a transparent texture on the panel; only where a canvas exists (browser). */
+function silkscreen(spec: DeviceSpec): THREE.Mesh | undefined {
+  if (typeof document === 'undefined') return undefined;
+  const lay = spec.layout!;
+  const { width: W, depth: D } = lay.panel;
+  const k = 6; // px per mm
+  const cv = document.createElement('canvas');
+  cv.width = Math.ceil(W * k);
+  cv.height = Math.ceil(D * k);
+  const cx = cv.getContext('2d');
+  if (!cx) return undefined;
+  cx.textBaseline = 'alphabetic';
+  for (const g of spec.groups ?? []) {
+    const bb = groupBBox(spec, g.id, GROUP_PAD);
+    if (!bb) continue;
+    cx.fillStyle = g.color ?? '#aaaaaa';
+    cx.font = `${3 * k}px sans-serif`;
+    cx.fillText(g.label, (bb.x + 1) * k, (bb.y - 1) * k);
+  }
+  cx.fillStyle = '#eeeeee';
+  for (const a of lay.annotations) {
+    if (a.kind !== 'text') continue;
+    cx.font = `bold ${(a.size ?? 4) * k}px sans-serif`;
+    cx.fillText(a.text, a.x * k, a.y * k);
+  }
+  const tex = new THREE.CanvasTexture(cv);
+  tex.colorSpace = THREE.SRGBColorSpace;
+  const plane = new THREE.Mesh(new THREE.PlaneGeometry(W, D), new THREE.MeshBasicMaterial({ map: tex, transparent: true, depthWrite: false }));
+  plane.name = 'silkscreen';
+  plane.rotation.x = -Math.PI / 2;
+  plane.position.set(W / 2, 0.05, D / 2);
+  return plane;
 }
 
 /** Fader cap z for value 0..1 (1 = away from the player). */

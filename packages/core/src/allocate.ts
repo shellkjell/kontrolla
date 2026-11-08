@@ -1,6 +1,10 @@
 import { MCUS } from './catalog';
 import type { AnalogControl, ButtonControl, DeviceSpec, Mux } from './types';
 
+/** [TX, RX] pairs the UART peripherals can use. RP2040: UART0 GP0/1, 12/13, 16/17; UART1 GP4/5, 8/9. Teensy 4.1: Serial1, 2, 4, 5. */
+const UART_PAIRS_PICO: [number, number][] = [[0, 1], [12, 13], [16, 17], [4, 5], [8, 9]];
+const UART_PAIRS_TEENSY: [number, number][] = [[1, 0], [8, 7], [17, 16], [20, 21]];
+
 const isAnalog = (c: { kind: string }): c is AnalogControl => c.kind === 'pot' || c.kind === 'fader';
 
 /** Fill missing pins/mux slots. Deterministic; respects manual pins; leaves pins unset if the MCU runs out.
@@ -27,6 +31,20 @@ export function allocatePins(input: DeviceSpec): DeviceSpec {
     return p;
   };
 
+  // ---- hardware MIDI port: a legal UART pin pair (TX, RX), picked before anything else grabs the low pins ----
+  if (spec.midiPort) {
+    if (spec.midiPort.txPin !== undefined) used.add(spec.midiPort.txPin);
+    if (spec.midiPort.rxPin !== undefined) used.add(spec.midiPort.rxPin);
+    if (spec.midiPort.txPin === undefined && spec.midiPort.rxPin === undefined) {
+      const pairs = spec.mcu === 'rp2040-pico' ? UART_PAIRS_PICO : UART_PAIRS_TEENSY;
+      const pair = pairs.find(([tx, rx]) => [tx, rx].every((p) => mcu.usableGpio.includes(p) && !mcu.reserved.includes(p) && !used.has(p)));
+      if (pair) {
+        [spec.midiPort.txPin, spec.midiPort.rxPin] = pair;
+        pair.forEach((p) => used.add(p));
+      }
+    }
+  }
+
   // ---- analog ----
   const freeAdc = mcu.adcPins.filter((p) => !used.has(p));
   const need = spec.controls.filter((c): c is AnalogControl => isAnalog(c) && c.pin === undefined && !c.mux);
@@ -42,15 +60,21 @@ export function allocatePins(input: DeviceSpec): DeviceSpec {
   let d = Math.min(need.length, freeAdc.length);
   let newMuxes = 0;
   while (need.length - d > aSlots.length + 16 * newMuxes && d > 0) (d--, newMuxes++);
-  const sigs = freeAdc.slice(d, d + newMuxes);
+  // Still short with every ADC pin on a mux: extra muxes share a SIG pin and tell themselves apart by their EN pin.
+  const short = need.length - d - aSlots.length - 16 * newMuxes;
+  if (short > 0 && freeAdc.length > 0) newMuxes += Math.ceil(short / 16);
+  const pool = freeAdc.slice(d);
+  const sigs = Array.from({ length: pool.length ? newMuxes : 0 }, (_, i) => pool[i % pool.length]!);
   [...freeAdc.slice(0, d), ...sigs].forEach((p) => used.add(p));
+  const shared = (i: number) => sigs.filter((p) => p === sigs[i]).length > 1;
+  const enNeeded = sigs.filter((_, i) => shared(i)).length;
 
   // ---- buttons: direct pins or digital muxes ----
   const btns = spec.controls.filter((c): c is ButtonControl => c.kind === 'button' && c.pin === undefined && !c.mux);
   const encPins = spec.controls.reduce((n, c) => n + (c.kind === 'encoder' ? Number(c.pinA === undefined) + Number(c.pinB === undefined) : 0), 0);
   const busPins = spec.muxes.length > 0 ? 0 : 4;
   const ledPin = spec.leds && spec.leds.pin === undefined ? 1 : 0;
-  const freeNow = digital().length - (sigs.length > 0 ? busPins : 0) - ledPin - encPins;
+  const freeNow = digital().length - (sigs.length > 0 ? busPins : 0) - enNeeded - ledPin - encPins;
   const dSigs = btns.length > freeNow ? Math.max(0, Math.ceil((btns.length - dSlots.length) / 16)) : 0;
   const bus = (): [number, number, number, number] | undefined => {
     const first = spec.muxes[0];
@@ -59,18 +83,18 @@ export function allocatePins(input: DeviceSpec): DeviceSpec {
     return sel.some((s) => s === undefined) ? undefined : (sel as [number, number, number, number]);
   };
 
-  const newMux = (sigPin: number, signal: Mux['signal'], sel: [number, number, number, number]) => {
+  const newMux = (sigPin: number, signal: Mux['signal'], sel: [number, number, number, number], enablePin?: number) => {
     let n = spec.muxes.filter((m) => m.signal === signal).length + 1;
     const prefix = signal === 'digital' ? 'dmux' : 'mux';
     while (spec.muxes.some((m) => m.id === `${prefix}${n}`)) n++;
-    const m: Mux = { id: `${prefix}${n}`, part: 'mux-74hc4067', sigPin, selectPins: sel, signal };
+    const m: Mux = { id: `${prefix}${n}`, part: 'mux-74hc4067', sigPin, selectPins: sel, signal, ...(enablePin !== undefined && { enablePin }) };
     spec.muxes.push(m);
     addSlotsFor(m);
   };
 
   const sel = sigs.length + dSigs > 0 ? bus() : undefined;
   if (sel) {
-    for (const sigPin of sigs) newMux(sigPin, 'analog', sel);
+    sigs.forEach((sigPin, i) => newMux(sigPin, 'analog', sel, shared(i) ? take() : undefined));
     for (let i = 0; i < dSigs; i++) {
       const sigPin = take();
       if (sigPin === undefined) break;
