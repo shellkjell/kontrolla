@@ -1,0 +1,12 @@
+cmake_minimum_required(VERSION 3.13)
+set(PICO_BOARD pico)
+set(PICO_SDK_PATH ${CMAKE_CURRENT_LIST_DIR}/../../.toolchain/pico-sdk)
+include(${PICO_SDK_PATH}/pico_sdk_init.cmake)
+project(kontrolla-rp2040 C CXX ASM)
+pico_sdk_init()
+
+add_executable(kontrolla-rp2040 src/main.c src/config.c src/usb_descriptors.c)
+target_include_directories(kontrolla-rp2040 PRIVATE src)
+target_link_libraries(kontrolla-rp2040 pico_stdlib hardware_adc pico_unique_id tinyusb_device)
+target_compile_options(kontrolla-rp2040 PRIVATE -Wall -Wextra -Werror)
+pico_add_extra_outputs(kontrolla-rp2040)
