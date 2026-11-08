@@ -94,15 +94,15 @@ export function duplicateGroup(input: DeviceSpec, groupId: string, times = 1): D
     let delta = 1;
     const free = (n: number) => !groups.some((g) => g.label === (bump(src.label, n) ?? src.label) || g.id === (bump(src.id, n) ?? `${src.id}${n + 1}`));
     while (!free(delta)) delta++;
+    const idMap = new Map<string, string>();
     const newId = (id: string): string => {
       let n = delta;
       for (;;) {
         const c = bump(id, n) ?? `${id}${n + 1}`;
-        if (!exists(spec, c) && !groups.some((g) => g.id === c)) return c;
+        if (!exists(spec, c) && !groups.some((g) => g.id === c) && ![...idMap.values()].includes(c)) return c;
         n++;
       }
     };
-    const idMap = new Map<string, string>();
     for (const id of src.members) idMap.set(id, newId(id));
     const label = (l: string | undefined) => (l === undefined ? undefined : (bump(l, delta) ?? l));
 

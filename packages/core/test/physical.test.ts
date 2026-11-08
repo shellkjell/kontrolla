@@ -1,4 +1,5 @@
 import { expect, test } from 'bun:test';
+import type { DeviceSpec } from '../src';
 import { EXAMPLES, allocatePins, autoLayout, bom, buildSteps, duplicateGroup, ensureLayout, groupOf, nextFreeMidi, validate, validateLayout } from '../src';
 
 const errors = (s: Parameters<typeof validate>[0]) => validate(s).filter((i) => i.severity === 'error');
@@ -71,4 +72,13 @@ test('finger clearance warning', () => {
   const a = s.layout!.placements.pot1!;
   s.layout!.placements.pot2 = { x: a.x + 16, y: a.y };
   expect(validateLayout(s).some((i) => i.severity === 'warning' && i.message.includes('hard to turn'))).toBe(true);
+});
+
+test('duplicateGroup gives unique ids when member ids are consecutive', async () => {
+  const { createGroup } = await import('../src');
+  const pot = (id: string) => ({ id, kind: 'pot' as const, part: 'pot-b10k', midi: { type: 'cc' as const, channel: 1, cc: id === 'pot1' ? 1 : 2, min: 0, max: 127 }, deadband: 12, smoothing: 0 });
+  let spec: DeviceSpec = { ...EXAMPLES.starter!, controls: [pot('pot1'), pot('pot2')], muxes: [], groups: [], layout: undefined, meters: [], leds: undefined };
+  spec = createGroup(spec, 'Ch 1', ['pot1', 'pot2'], { kind: 'strip' });
+  const ids = duplicateGroup(spec, spec.groups![0]!.id, 2).controls.map((c) => c.id);
+  expect(new Set(ids).size).toBe(ids.length);
 });
