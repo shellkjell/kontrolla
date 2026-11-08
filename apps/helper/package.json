@@ -1,0 +1,8 @@
+{
+  "name": "@kontrolla/helper",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "scripts": { "start": "bun src/main.ts" },
+  "dependencies": { "@julusian/midi": "^3.6.1", "ws": "^8.18.0" }
+}
