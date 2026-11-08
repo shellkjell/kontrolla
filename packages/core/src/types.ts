@@ -131,6 +131,8 @@ export interface DeviceSpec {
   controls: Control[];
   leds?: LedChain;
   midiPort?: MidiPort;
+  ioSlots?: IoSlot[];
+  audio?: AudioEngine; // surface talks to the engine over midiPort (engine sends meter levels back as CC)
   meters?: Meter[];
   groups?: Group[];
   layout?: Layout;
@@ -141,6 +143,39 @@ export interface SimOptions {
   analogNoiseLsb?: number; // peak noise on 12-bit ADC reads, default 0
   buttonBounceMs?: number; // contact bounce duration on each edge, default 0
   seed?: number;
+}
+
+// ---- Audio (v4): swappable per-channel I/O modules + an audio-engine board driven by the surface ----
+
+/** A rear I/O slot holding one swappable module (catalog IO_MODULES). Placement by slot id on the rear face. */
+export interface IoSlot {
+  id: string;
+  label?: string;
+  module: string; // IO_MODULES id, e.g. 'io-dual-trs', 'io-rca', 'io-xlr', 'io-trs-rca-combo'
+}
+
+export type ChannelParam =
+  | 'gain' | 'eqHi' | 'eqHiMid' | 'eqLoMid' | 'eqLo' | 'filter' | 'fxSend' | 'pan' | 'fader'
+  | 'mute' | 'solo' | 'cue' | 'inputSelect';
+export type MasterParam = 'master' | 'booth' | 'phones' | 'cueMix' | 'fxReturn';
+
+export interface AudioChannel {
+  id: string;
+  label: string;
+  slot: string; // IoSlot id feeding this channel
+  stereo: boolean; // default true; a mono module (single XLR) is dual-mono into a stereo channel
+  bind: Partial<Record<ChannelParam, string>>; // param -> surface control id (its MIDI target is what the engine listens to)
+  meter?: string; // surface Meter id the engine feeds with this channel's level
+}
+
+export interface AudioEngine {
+  board: string; // AUDIO_BOARDS id, e.g. 'teensy41-cs42448x2' (experimental) | 'teensy41-cs42448' (proven)
+  channels: AudioChannel[];
+  master: {
+    bind: Partial<Record<MasterParam, string>>;
+    meters?: { left?: string; right?: string };
+    outputs: string[]; // fixed rear master I/O modules (IO_MODULES ids with direction 'out')
+  };
 }
 
 /** One implementation per fidelity level: firmware (rp2040js) and model (core). */
@@ -155,4 +190,8 @@ export interface DeviceSim {
   sendMidi(msg: number[]): void;
   /** Scaled RGB per LED (length = leds.count*3) whenever the chain is refreshed. */
   onLeds(cb: (rgb: Uint8Array, timeMs: number) => void): () => void;
+  /** Hardware MIDI port, host side. Raw UART RX bytes into the device (running status allowed); ignored without `midiPort.rxPin`. */
+  sendPortMidi?(bytes: number[]): void;
+  /** Hardware MIDI port: every message the device mirrors to UART TX (needs `midiPort.txPin`), same order as USB. */
+  onPortMidi?(cb: (msg: number[], timeMs: number) => void): () => void;
 }
