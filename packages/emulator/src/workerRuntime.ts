@@ -9,12 +9,14 @@ export type WorkerIn =
   | { type: 'setButton'; id: string; pressed: boolean }
   | { type: 'turnEncoder'; id: string; detents: number }
   | { type: 'sendMidi'; msg: number[] }
+  | { type: 'sendPortMidi'; bytes: number[] }
   | { type: 'run' }
   | { type: 'pause' };
 
 export type WorkerOut =
   | { type: 'ready'; product: string; usbState: UsbState }
   | { type: 'midi'; events: { msg: number[]; timeMs: number }[] }
+  | { type: 'portMidi'; events: { msg: number[]; timeMs: number }[] }
   | { type: 'leds'; rgb: Uint8Array; timeMs: number }
   | { type: 'stats'; simMsPerWallMs: number; lagMs: number }
   | { type: 'error'; message: string };
@@ -30,6 +32,7 @@ export function createWorkerRuntime(
 ) {
   let dev: Rp2040Device | undefined;
   let events: { msg: number[]; timeMs: number }[] = [];
+  let portEvents: { msg: number[]; timeMs: number }[] = [];
   let ledFrames: { rgb: Uint8Array; timeMs: number }[] = [];
   let running = false;
   let gen = 0;
@@ -58,6 +61,10 @@ export function createWorkerRuntime(
           post({ type: 'midi', events });
           events = [];
         }
+        if (portEvents.length) {
+          post({ type: 'portMidi', events: portEvents });
+          portEvents = [];
+        }
         // Only the newest frame matters to a UI; older ones in the same chunk are dropped.
         const f = ledFrames.at(-1);
         if (f) post({ type: 'leds', rgb: f.rgb, timeMs: f.timeMs });
@@ -85,6 +92,7 @@ export function createWorkerRuntime(
       gen++;
       dev = await createRp2040Device(m.spec, new Uint8Array(m.firmwareBin), m.opts);
       dev.onMidi((msg, timeMs) => events.push({ msg, timeMs }));
+      dev.onPortMidi((msg, timeMs) => portEvents.push({ msg, timeMs }));
       dev.onLeds((rgb, timeMs) => ledFrames.push({ rgb, timeMs }));
       post({ type: 'ready', product: dev.product, usbState: dev.usbState }); // client sends 'run' after power-on stimulus
     } else if (!dev) {
@@ -93,6 +101,7 @@ export function createWorkerRuntime(
     else if (m.type === 'setButton') dev.setButton(m.id, m.pressed);
     else if (m.type === 'turnEncoder') dev.turnEncoder(m.id, m.detents);
     else if (m.type === 'sendMidi') dev.sendMidi(m.msg);
+    else if (m.type === 'sendPortMidi') dev.sendPortMidi(m.bytes);
     else if (m.type === 'run') start();
     else if (m.type === 'pause') running = false;
   }

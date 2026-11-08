@@ -1,4 +1,4 @@
-// Config blob v2 encoder/decoder, CONTRACTS §1 (RP2040 only).
+// Config blob v3 encoder/decoder, CONTRACTS §1 (RP2040 only).
 import type { DeviceSpec } from './types';
 
 export const BLOB_MAGIC = 0x314c524b;
@@ -15,10 +15,11 @@ export function crc32(b: Uint8Array): number {
 
 const NONE = 0xff;
 
-export const BLOB_VERSION = 2;
+export const BLOB_VERSION = 3;
 export const BLOB_MAX = 4096;
 export const HEADER_LEN = 44;
 export const LED_REC_LEN = 8;
+export const PORT_REC_LEN = 8;
 export const MUX_REC_LEN = 8;
 export const CTRL_REC_LEN = 20;
 export const METER_REC_LEN = 8;
@@ -35,7 +36,7 @@ export function encodeConfig(spec: DeviceSpec): Uint8Array {
   const name = spec.usbProductName;
   if (name.length > 31 || !/^[\x20-\x7e]*$/.test(name)) throw new Error('encodeConfig: usbProductName must be <=31 printable ASCII chars');
   const meters = spec.meters ?? [];
-  const total = HEADER_LEN + LED_REC_LEN + MUX_REC_LEN * spec.muxes.length + CTRL_REC_LEN * spec.controls.length + METER_REC_LEN * meters.length + 4;
+  const total = HEADER_LEN + LED_REC_LEN + PORT_REC_LEN + MUX_REC_LEN * spec.muxes.length + CTRL_REC_LEN * spec.controls.length + METER_REC_LEN * meters.length + 4;
   if (total > BLOB_MAX) throw new Error(`encodeConfig: blob is ${total} B (max ${BLOB_MAX})`);
   if (spec.controls.length > 255 || meters.length > 255) throw new Error('encodeConfig: too many controls/meters');
   const out = new Uint8Array(total);
@@ -61,10 +62,14 @@ export function encodeConfig(spec: DeviceSpec): Uint8Array {
     out[o + 2] = leds.brightness;
   }
   o += LED_REC_LEN;
+  out[o] = spec.midiPort?.txPin ?? NONE;
+  out[o + 1] = spec.midiPort?.rxPin ?? NONE;
+  o += PORT_REC_LEN;
   for (const m of spec.muxes) {
     out[o] = m.sigPin;
     m.selectPins.forEach((p, i) => (out[o + 1 + i] = p));
     out[o + 5] = m.signal === 'digital' ? 1 : 0;
+    out[o + 6] = m.enablePin ?? NONE;
     o += MUX_REC_LEN;
   }
   for (const c of spec.controls) {
@@ -124,7 +129,8 @@ export function encodeConfig(spec: DeviceSpec): Uint8Array {
 export interface DecodedConfig {
   name: string;
   led: { pin: number; count: number; brightness: number };
-  muxes: { sig: number; sel: number[]; signal: number }[];
+  port: { tx: number; rx: number };
+  muxes: { sig: number; sel: number[]; signal: number; en: number }[];
   controls: {
     kind: number; pinA: number; pinB: number; muxIndex: number; muxChannel: number; midiType: number; channel: number;
     number: number; min: number; max: number; flags: number; debounceMs: number; deadband: number; smoothing: number;
@@ -135,11 +141,11 @@ export interface DecodedConfig {
 
 export function decodeConfig(b: Uint8Array): DecodedConfig {
   const dv = new DataView(b.buffer, b.byteOffset, b.byteLength);
-  if (b.length < HEADER_LEN + LED_REC_LEN + 4 || dv.getUint32(0, true) !== BLOB_MAGIC) throw new Error('bad magic');
+  if (b.length < HEADER_LEN + LED_REC_LEN + PORT_REC_LEN + 4 || dv.getUint32(0, true) !== BLOB_MAGIC) throw new Error('bad magic');
   if (dv.getUint16(4, true) !== BLOB_VERSION) throw new Error('bad version');
   const total = dv.getUint16(6, true);
   const nc = b[8]!, nm = b[9]!, nt = b[10]!;
-  if (total > b.length || total !== HEADER_LEN + LED_REC_LEN + MUX_REC_LEN * nm + CTRL_REC_LEN * nc + METER_REC_LEN * nt + 4) throw new Error('bad length');
+  if (total > b.length || total !== HEADER_LEN + LED_REC_LEN + PORT_REC_LEN + MUX_REC_LEN * nm + CTRL_REC_LEN * nc + METER_REC_LEN * nt + 4) throw new Error('bad length');
   if (dv.getUint32(total - 4, true) !== crc32(b.subarray(0, total - 4))) throw new Error('bad crc');
   let end = 12;
   while (end < 44 && b[end] !== 0) end++;
@@ -147,8 +153,10 @@ export function decodeConfig(b: Uint8Array): DecodedConfig {
   let o = HEADER_LEN;
   const led = { pin: b[o]!, count: b[o + 1]!, brightness: b[o + 2]! };
   o += LED_REC_LEN;
+  const port = { tx: b[o]!, rx: b[o + 1]! };
+  o += PORT_REC_LEN;
   const muxes = [];
-  for (let i = 0; i < nm; i++, o += MUX_REC_LEN) muxes.push({ sig: b[o]!, sel: [...b.subarray(o + 1, o + 5)], signal: b[o + 5]! });
+  for (let i = 0; i < nm; i++, o += MUX_REC_LEN) muxes.push({ sig: b[o]!, sel: [...b.subarray(o + 1, o + 5)], signal: b[o + 5]!, en: b[o + 6]! });
   const controls = [];
   for (let i = 0; i < nc; i++, o += CTRL_REC_LEN)
     controls.push({
@@ -158,5 +166,5 @@ export function decodeConfig(b: Uint8Array): DecodedConfig {
     });
   const meters = [];
   for (let i = 0; i < nt; i++, o += METER_REC_LEN) meters.push({ channel: b[o]!, cc: b[o + 1]!, ledStart: b[o + 2]!, ledCount: b[o + 3]! });
-  return { name, led, muxes, controls, meters };
+  return { name, led, port, muxes, controls, meters };
 }

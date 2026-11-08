@@ -38,7 +38,7 @@ export function generateTeensySketch(spec: DeviceSpec): string {
     ];
     return `  {${f.join(', ')}}, // ${c.id}`;
   });
-  const muxRows = spec.muxes.map((x) => `  {${x.sigPin}, {${x.selectPins.join(', ')}}, ${x.signal === 'digital' ? 1 : 0}}, // ${x.id}`);
+  const muxRows = spec.muxes.map((x) => `  {${x.sigPin}, {${x.selectPins.join(', ')}}, ${x.signal === 'digital' ? 1 : 0}, ${x.enablePin ?? 255}}, // ${x.id}`);
   const meterRows = meters.map((t) => `  {${t.midi.channel - 1}, ${t.midi.cc}, ${t.ledStart}, ${t.ledCount}}, // ${t.id}`);
 
   return `${HEADER}
@@ -47,7 +47,7 @@ export function generateTeensySketch(spec: DeviceSpec): string {
 ${ledCount > 0 ? '#include <FastLED.h>\n' : ''}
 // ch is the 0-15 wire channel. led = chain index (255 = none), rgb = lit colour.
 struct Ctl { uint8_t kind, pinA, pinB, mux, muxCh, type, ch, num, mn, mx, flags, debounce, deadband, smoothing, led, r, g, b; };
-struct Mux { uint8_t sig; uint8_t sel[4]; uint8_t digital; };
+struct Mux { uint8_t sig; uint8_t sel[4]; uint8_t digital; uint8_t en; };  // en = active-low EN pin, 255 = none
 struct Meter { uint8_t ch, cc, start, count; };
 struct St { bool first; int32_t acc, lastS, lastV; uint8_t stable, counter; bool on, ledOn; uint8_t prev; int8_t q; int16_t value; };
 
@@ -59,7 +59,7 @@ static const Ctl CTL[${Math.max(n, 1)}] = {
 ${rows.join('\n') || '  {0}'}
 };
 static const Mux MUX[${Math.max(m, 1)}] = {
-${muxRows.join('\n') || '  {0, {0, 0, 0, 0}, 0}'}
+${muxRows.join('\n') || '  {0, {0, 0, 0, 0}, 0, 255}'}
 };
 static const Meter METER[${Math.max(nm, 1)}] = {
 ${meterRows.join('\n') || '  {0, 0, 0, 0}'}
@@ -77,18 +77,28 @@ static int32_t floorDiv(int32_t a, int32_t b) {
   return q;
 }
 
-static void sendCC(const Ctl &c, uint8_t v) { usbMIDI.sendControlChange(c.num, v, c.ch + 1); usbMIDI.send_now(); }
+// Every message goes to USB and, in the same order, to the UART MIDI port (Serial1, 31250 baud).
+static void midiSend(uint8_t status, uint8_t d1, uint8_t d2) {
+  uint8_t ch = (status & 0x0F) + 1;
+  if ((status & 0xF0) == 0x90) usbMIDI.sendNoteOn(d1, d2, ch);
+  else if ((status & 0xF0) == 0x80) usbMIDI.sendNoteOff(d1, d2, ch);
+  else usbMIDI.sendControlChange(d1, d2, ch);
+  usbMIDI.send_now();
+${spec.midiPort?.txPin !== undefined ? '  Serial1.write(status); Serial1.write(d1); Serial1.write(d2);\n' : ''}}
+
+static void sendCC(const Ctl &c, uint8_t v) { midiSend(0xB0 | c.ch, c.num, v); }
 
 static void sendEdge(const Ctl &c, bool on) {
-  if (c.type == 2) {
-    if (on) usbMIDI.sendNoteOn(c.num, c.mx, c.ch + 1); else usbMIDI.sendNoteOff(c.num, 0, c.ch + 1);
-  } else {
-    usbMIDI.sendControlChange(c.num, on ? c.mx : c.mn, c.ch + 1);
-  }
-  usbMIDI.send_now();
+  if (c.type == 2) midiSend((on ? 0x90 : 0x80) | c.ch, c.num, on ? c.mx : 0);
+  else midiSend(0xB0 | c.ch, c.num, on ? c.mx : c.mn);
 }
 
+// Shared SIG pins: drive every OTHER mux's EN high, this mux's EN low, set S0..S3, wait 10 us.
 static void selectMux(const Mux &m, uint8_t ch) {
+  if (m.en != 255) {
+    for (uint8_t i = 0; i < ${Math.max(m, 1)}; i++) if (&MUX[i] != &m && MUX[i].sig == m.sig && MUX[i].en != 255) digitalWrite(MUX[i].en, HIGH);
+    digitalWrite(m.en, LOW);
+  }
   for (uint8_t b = 0; b < 4; b++) digitalWrite(m.sel[b], (ch >> b) & 1);
   delayMicroseconds(10);
 }
@@ -210,7 +220,9 @@ void setup() {
   for (uint8_t i = 0; i < ${m}; i++) {
     for (uint8_t b = 0; b < 4; b++) pinMode(MUX[i].sel[b], OUTPUT);
     if (MUX[i].digital) pinMode(MUX[i].sig, INPUT_PULLUP);
+    if (MUX[i].en != 255) { pinMode(MUX[i].en, OUTPUT); digitalWrite(MUX[i].en, HIGH); }  // start disabled
   }
+${spec.midiPort ? '  Serial1.begin(31250);\n' : ''}
   for (uint8_t i = 0; i < NCTL; i++) {
     const Ctl &c = CTL[i];
     ST[i].first = true; ST[i].stable = 1; ST[i].prev = 3; ST[i].value = c.mn;
@@ -219,8 +231,26 @@ void setup() {
   }
 ${ledCount > 0 ? `  FastLED.addLeds<WS2812, ${ledPin}, GRB>(leds, LED_COUNT);  // 3V3 data: use a 74AHCT125 level shifter or SK6812\n` : ''}}
 
+${
+  spec.midiPort?.rxPin !== undefined
+    ? `// UART RX (CONTRACTS 2.3): running status accepted, real-time bytes ignored, system messages clear running status.
+static uint8_t rxStatus = 0, rxHave = 0, rxData[2];
+static void portRxByte(uint8_t b) {
+  if (b >= 0xF8) return;
+  if (b & 0x80) { rxHave = 0; rxStatus = (b >= 0xF0) ? 0 : b; return; }
+  if (!rxStatus) return;
+  rxData[rxHave++] = b;
+  uint8_t need = ((rxStatus & 0xE0) == 0xC0) ? 1 : 2;
+  if (rxHave == need) {
+    onFeedback(rxStatus & 0xF0, rxStatus & 0x0F, rxData[0], need == 2 ? rxData[1] : 0);
+    rxHave = 0;
+  }
+}
+`
+    : ''
+}
 void loop() {
-  while (usbMIDI.read()) {
+${spec.midiPort?.rxPin !== undefined ? '  while (Serial1.available()) portRxByte(Serial1.read());\n' : ''}  while (usbMIDI.read()) {
     uint8_t t = usbMIDI.getType();
     if (t == usbMIDI.NoteOn) onFeedback(0x90, usbMIDI.getChannel() - 1, usbMIDI.getData1(), usbMIDI.getData2());
     else if (t == usbMIDI.NoteOff) onFeedback(0x80, usbMIDI.getChannel() - 1, usbMIDI.getData1(), usbMIDI.getData2());

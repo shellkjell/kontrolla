@@ -9,11 +9,11 @@ semantics independently:
 They must produce **the same MIDI message sequence** for the same stimulus
 script when noise is off. Timestamps may differ. Differential tests enforce this.
 
-## 1. Config blob v2 (RP2040)
+## 1. Config blob v3 (RP2040)
 
 The firmware is one generic image. The device spec is encoded into a blob at
 flash offset `0x1F0000`, which is XIP address `0x101F0000`. The blob is at most
-4096 bytes and little-endian. **Version 2**; the firmware rejects any other version (v1 blobs included).
+4096 bytes and little-endian. **Version 3**; the firmware rejects any other version (v1 and v2 blobs included).
 
 | off | size | field |
 |----:|-----:|-------|
@@ -26,17 +26,21 @@ flash offset `0x1F0000`, which is XIP address `0x101F0000`. The blob is at most
 | 11 | 1  | reserved = 0 |
 | 12 | 32 | usbProductName, ASCII, NUL-padded, max 31 chars |
 | 44 | 8  | LED record |
-| 52 | 8×muxCount | mux records |
+| 52 | 8  | MIDI port record |
+| 60 | 8×muxCount | mux records (muxCount ≤ 16) |
 | …  | 20×controlCount | control records, in `spec.controls` order |
 | …  | 8×meterCount | meter records, in `spec.meters` order |
 | …  | 4  | CRC32 (IEEE/zlib) over all preceding bytes |
 
-The firmware requires `total length == 44 + 8 + 8·muxCount + 20·controlCount + 8·meterCount + 4`.
+The firmware requires `total length == 44 + 8 + 8 + 8·muxCount + 20·controlCount + 8·meterCount + 4`.
 
 **LED record (8 B):** `u8 pin` (GPIO of the WS2812 chain, `0xFF` = no chain), `u8 count` (0 = no chain), `u8 brightness`, `u8 pad[5]`=0.
 
-**Mux record (8 B):** `u8 sig` (GPIO of SIG; for an analog mux this is 26+ADC channel), `u8 sel[4]` (GPIO for S0..S3), `u8 signal` (0 = analog, 1 = digital), `u8 pad[2]`=0.
-Muxes may share select pins (a shared select bus); the firmware simply drives the four pins before every mux read.
+**MIDI port record (8 B):** `u8 tx` (UART TX GPIO, `0xFF` = none), `u8 rx` (UART RX GPIO, `0xFF` = none), `u8 pad[6]`=0.
+Both `0xFF` = no port. The UART is UART0 for GPIO 0/1/12/13/16/17 and UART1 for 4/5/8/9/20/21.
+
+**Mux record (8 B):** `u8 sig` (GPIO of SIG; for an analog mux this is 26+ADC channel), `u8 sel[4]` (GPIO for S0..S3), `u8 signal` (0 = analog, 1 = digital), `u8 en` (GPIO of the active-low EN pin, `0xFF` = none), `u8 pad`=0.
+Muxes may share select pins (a shared select bus) and, when each has its own EN pin, a SIG pin.
 
 **Control record (20 B):**
 
@@ -71,17 +75,24 @@ USB MIDI with product name `kont.rolla (no config)`, sends nothing, and blinks
 GPIO25.
 
 USB IDs: VID `0x1209`, PID `0x0001` (pid.codes test PID; hobby/dev only).
-Single USB-MIDI cable 0 (IN and OUT endpoints). No running status.
+Single USB-MIDI cable 0 (IN and OUT endpoints). No running status on output (USB or UART).
 
 ## 2. Semantics (firmware and model must match)
 
 There is one **scan every 1 ms**. Scanning starts once USB is configured; the first scan latches baselines and sends nothing. Controls are processed in record order on
 each scan, and every MIDI message is emitted immediately in that order.
 
+### Mux enable (shared SIG pins)
+
+Muxes with an `enablePin` (74HC4067 EN, **active low**) start disabled (EN high). To read a channel of a mux that has an EN pin, the firmware first drives
+the EN of every *other* mux that shares its SIG pin high and its own EN low, then drives S0..S3, waits 10 µs and reads. The same applies to digital muxes.
+The SIG pin therefore carries exactly the selected channel of the one enabled mux. Validation requires every mux on a shared SIG pin to have its own EN pin
+(all of the same signal type); an emulator that sees none or several enabled reads 0 (analog) or a floating-high pin (digital).
+
 ### Analog (pot/fader)
 
 The raw value `raw` is 0..4095. For a mux control: drive S0..S3 to
-`channel` bits (S0 = LSB), wait 10 µs, then read the mux's SIG ADC channel.
+`channel` bits (S0 = LSB), wait 10 µs, then read the mux's SIG ADC channel (and see *Mux enable* below).
 
 ```
 k   = 256 - smoothing
@@ -148,10 +159,29 @@ GRB on the wire, 800 kHz, driven by PIO on the chain pin. LED state:
 - **Refresh:** after mount, a frame is pushed on the first scan; afterwards at most once per 10 ms, on scans where `scanCount % 10 == 0` (first scan = scanCount 0) and the state is dirty
   (set by any local button edge, and by any host message that matches a button or meter, even if the value does not change). `DeviceSim.onLeds` receives the scaled RGB bytes (count × 3) of each pushed frame.
 
+### 2.3 Hardware MIDI port (UART)
+
+`spec.midiPort`: UART at 31250 baud, 8N1 (UART0 or UART1 by pin; validation requires a legal TX/RX pair). Either pin may be absent (out-only / in-only port).
+
+- **TX:** every message sent on USB is also sent on UART TX, the same bytes in the same order (full status byte every time, no running status on output).
+  Nothing is dropped below 1.3 s of queued wire time (4096-byte ring); the firmware sends from a RAM ring so a burst never delays the scan.
+- **RX:** bytes are parsed as MIDI **with running status** and each complete message is processed exactly like a USB-received one (§2.1: button LED/toggle feedback, meters). Parser:
+  real-time bytes (`0xF8`-`0xFF`) are ignored and do not disturb running status; a status byte `0x80`-`0xEF` starts a message and becomes the running status;
+  `0xF0`-`0xF7` (SysEx, system common) clear running status and their data bytes are dropped; a new status byte abandons an incomplete message; data bytes with no running status are dropped.
+  `0xC0`/`0xD0` messages take 1 data byte, the rest 2. There is **no echo and no thru**.
+- `DeviceSim.onPortMidi(cb)` reports every mirrored UART TX message; `DeviceSim.sendPortMidi(bytes)` injects raw RX bytes (running status allowed).
+
+### 2.4 Scan budget
+
+A mux read costs ≥ 10 µs settle plus a 2 µs ADC conversion and ~2 µs of code, about **14 µs per analog mux read** (measured in rp2040js: 14.0 µs) and ~12 µs per digital one.
+Scan period is **not** changed: 59 analog mux reads need ~0.83 ms of the 1 ms period. If the sum exceeds 1 ms the firmware's next scan simply starts late, so debounce counts
+and encoder sampling run slower than 1 ms; validation warns once the estimate passes 1000 µs (ceiling ≈ 70 analog mux reads).
+The firmware sleeps (timer alarm + WFI) during the settle and the conversion rather than spinning.
+
 ## 3. Stimulus (shared physical layer, `packages/core/src/physics.ts`)
 
 - `setAnalog(id, x)`: `raw = round(clamp(x, 0, 1) * 4095)` (linear taper), plus seeded noise of ±`analogNoiseLsb` on each read, clamped to 0..4095.
-- `setButton(id, p)`: drives the pin low when pressed (a button on a digital mux: its mux channel, seen on the SIG pin only while the select lines address that channel). With `buttonBounceMs > 0`, each edge toggles at seeded random times within that window before settling.
+- `setButton(id, p)`: drives the pin low when pressed (a button on a digital mux: its mux channel, seen on the SIG pin only while that mux is enabled and the select lines address that channel). With `buttonBounceMs > 0`, each edge toggles at seeded random times within that window before settling.
 - `turnEncoder(id, n)`: |n| detents. Each detent is 4 transitions spaced **2 ms** apart, using the clockwise sequence `01, 00, 10, 11` or its reverse `10, 00, 01, 11`. The turns are queued and played out in simulated time by `advance()`.
 
 ## 4. Fidelity

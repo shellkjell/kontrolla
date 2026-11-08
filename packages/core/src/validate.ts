@@ -38,9 +38,20 @@ export function validate(spec: DeviceSpec): Issue[] {
   };
   const muxIds = new Map(spec.muxes.map((m) => [m.id, m]));
   const selUse = new Map<number, { pos: number; mux: string }>(); // shared select bus: same pin must keep the same S position
+  const sigOwner = new Map<number, string>(); // SIG pin -> first mux; later muxes sharing it must have their own EN
   for (const m of spec.muxes) {
     if (muxIds.get(m.id) !== m) add('error', `Duplicate mux id "${m.id}"`, undefined, 'Give every mux a unique id');
-    use(m.sigPin, m.id, undefined, `Mux ${m.id} SIG`);
+    const owner = sigOwner.get(m.sigPin);
+    if (!owner) {
+      sigOwner.set(m.sigPin, m.id);
+      use(m.sigPin, m.id, undefined, `Mux ${m.id} SIG`);
+    } else {
+      const o = muxIds.get(owner)!;
+      if (m.enablePin === undefined || o.enablePin === undefined)
+        add('error', `Muxes ${owner} and ${m.id} share SIG pin ${m.sigPin} but not every one has an enable pin`, undefined, 'Give every mux on a shared SIG pin its own enablePin (74HC4067 EN, active low)');
+      if (m.signal !== o.signal) add('error', `Muxes ${owner} (${o.signal}) and ${m.id} (${m.signal}) share SIG pin ${m.sigPin}`, undefined, 'Only muxes of the same signal type can share a SIG pin');
+    }
+    if (m.enablePin !== undefined) use(m.enablePin, `${m.id}.EN`, undefined, `Mux ${m.id} EN`);
     if (m.signal === 'analog' && !mcu.adcPins.includes(m.sigPin))
       add('error', `Mux ${m.id} SIG pin ${m.sigPin} is not ADC-capable (analog mux)`, undefined, `Use one of ${mcu.adcPins.join(', ')}`);
     else if (m.signal !== 'analog' && m.signal !== 'digital') add('error', `Mux ${m.id} signal must be 'analog' or 'digital'`);
@@ -141,6 +152,40 @@ export function validate(spec: DeviceSpec): Issue[] {
         `Lower LED brightness to ${safe} or less, or use fewer LEDs / an external 5 V supply`);
     } else add('info', `LEDs worst case ~${worst.toFixed(0)} mA from 5 V (budget ${BUDGET} mA)`);
     add('info', 'WS2812 data wants 5 V logic: add a 74AHCT125 level shifter on the 3V3 data line (or use SK6812, which accepts 3V3 data)');
+  }
+
+  // MIDI port (UART, CONTRACTS §2.3)
+  const port = spec.midiPort;
+  if (port) {
+    if (port.txPin === undefined && port.rxPin === undefined) add('warning', 'MIDI port has neither TX nor RX pin', undefined, 'Assign a UART TX (and RX) pin');
+    if (port.txPin !== undefined) use(port.txPin, 'midi-tx', undefined, 'MIDI port TX');
+    if (port.rxPin !== undefined) use(port.rxPin, 'midi-rx', undefined, 'MIDI port RX');
+    if (spec.mcu === 'rp2040-pico') {
+      const uart = (p: number | undefined, tx: boolean) => (p === undefined ? undefined : (tx ? [[0, 12, 16], [4, 8, 20]] : [[1, 13, 17], [5, 9, 21]]).findIndex((l) => l.includes(p)));
+      const t = uart(port.txPin, true);
+      const r = uart(port.rxPin, false);
+      if (t === -1) add('error', `MIDI TX pin ${port.txPin} is not a UART TX pin`, undefined, 'Use GPIO 0, 12, 16 (UART0) or 4, 8, 20 (UART1)');
+      if (r === -1) add('error', `MIDI RX pin ${port.rxPin} is not a UART RX pin`, undefined, 'Use GPIO 1, 13, 17 (UART0) or 5, 9, 21 (UART1)');
+      if (t !== undefined && r !== undefined && t >= 0 && r >= 0 && t !== r)
+        add('error', `MIDI TX (${port.txPin}) and RX (${port.rxPin}) are on different UARTs`, undefined, 'Pick a TX/RX pair from the same UART: (0|12|16, 1|13|17) or (4|8|20, 5|9|21)');
+    } else if (spec.mcu === 'teensy41') {
+      if (port.txPin !== undefined && port.txPin !== 1) add('error', `MIDI TX pin ${port.txPin} is not Serial1 TX (pin 1)`, undefined, 'Use pin 1');
+      if (port.rxPin !== undefined && port.rxPin !== 0) add('error', `MIDI RX pin ${port.rxPin} is not Serial1 RX (pin 0)`, undefined, 'Use pin 0');
+    }
+  }
+
+  // Scan budget: every mux read waits 10 us, ADC conversions take ~2 us, plus ~2 us of code. The scan period is 1 ms.
+  {
+    let us = 0;
+    for (const c of spec.controls) {
+      if (c.kind === 'encoder') us += 1;
+      else if (c.mux) us += 10 + 2 + (c.kind === 'button' ? 0 : 2); // settle + code (+ ADC conversion); measured 14 us per analog read in rp2040js
+      else us += c.kind === 'button' ? 1 : 3.5;
+    }
+    if (us > 1000)
+      add('warning', `Scan needs ~${us.toFixed(0)} µs but the scan period is 1000 µs: the real scan period stretches to ~${(us / 1000).toFixed(1)} ms (debounce counts and encoder sampling slow down)`, undefined,
+        'Move buttons to direct pins, drop mux channels, or split the controls over a second board');
+    else if (us > 700) add('info', `Scan needs ~${us.toFixed(0)} µs of the 1000 µs scan period`);
   }
 
   for (const [pin, who] of usage)

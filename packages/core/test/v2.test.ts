@@ -194,5 +194,5 @@ test('teensy sketch carries mux buttons, feedback handler and LEDs', async () =>
   expect(code).toContain('onFeedback(0x90');
   expect(code).toContain('INPUT_PULLUP');
   expect(code).toContain('static const uint8_t NMETER = 1;');
-  expect(code).toContain('{6, {2, 3, 4, 5}, 1}, // d');
+  expect(code).toContain('{6, {2, 3, 4, 5}, 1, 255}, // d');
 });

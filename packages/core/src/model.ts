@@ -23,7 +23,14 @@ export function createModelDevice(spec: DeviceSpec, opts: SimOptions = {}): Devi
   const stim = new Stimulus(spec, opts);
   const subs = new Set<(msg: number[], t: number) => void>();
   let now = 0;
-  const emit = (msg: number[]) => subs.forEach((cb) => cb(msg, now));
+  const portSubs = new Set<(msg: number[], t: number) => void>();
+  const portTx = spec.midiPort?.txPin !== undefined;
+  const portRx = spec.midiPort?.rxPin !== undefined;
+  // Every USB message is mirrored to the UART port in the same order (CONTRACTS §2.3).
+  const emit = (msg: number[]) => {
+    subs.forEach((cb) => cb(msg, now));
+    if (portTx) portSubs.forEach((cb) => cb(msg, now));
+  };
   const state: St[] = spec.controls.map((c) => ({
     first: true, acc: 0, lastS: 0, lastV: 0, stable: 1, counter: 0, on: false, prev: 3, q: 0,
     value: c.kind === 'encoder' ? c.midi.min : 0, ledOn: false,
@@ -40,8 +47,7 @@ export function createModelDevice(spec: DeviceSpec, opts: SimOptions = {}): Devi
   function button(c: Extract<Control, { kind: 'button' }>, s: St) {
     let raw: 0 | 1;
     if (c.mux) {
-      const m = spec.muxes.find((x) => x.id === c.mux!.id)!;
-      raw = stim.digitalMuxLevel(m.sigPin, c.mux.channel, now);
+      raw = stim.muxLevel(c.mux.id, c.mux.channel, now);
     } else raw = stim.pinLevel(c.pin!, now);
     if (raw === s.stable) return void (s.counter = 0);
     s.counter++;
@@ -167,6 +173,26 @@ export function createModelDevice(spec: DeviceSpec, opts: SimOptions = {}): Devi
       });
   }
 
+  // UART RX parser (CONTRACTS §2.3): running status on input, real-time bytes ignored, system messages clear running status.
+  let rxStatus = 0;
+  let rxData: number[] = [];
+  function portRxByte(b: number) {
+    b &= 0xff;
+    if (b >= 0xf8) return;
+    if (b & 0x80) {
+      rxData = [];
+      rxStatus = b >= 0xf0 ? 0 : b;
+      return;
+    }
+    if (!rxStatus) return;
+    rxData.push(b);
+    const need = (rxStatus & 0xe0) === 0xc0 ? 1 : 2;
+    if (rxData.length === need) {
+      sendMidi([rxStatus, ...rxData]);
+      rxData = [];
+    }
+  }
+
   return {
     fidelity: 'model',
     setAnalog: (id, v) => stim.setAnalog(id, v),
@@ -183,6 +209,13 @@ export function createModelDevice(spec: DeviceSpec, opts: SimOptions = {}): Devi
       return () => void subs.delete(cb);
     },
     sendMidi,
+    sendPortMidi(bytes) {
+      if (portRx) bytes.forEach(portRxByte);
+    },
+    onPortMidi(cb) {
+      portSubs.add(cb);
+      return () => void portSubs.delete(cb);
+    },
     onLeds(cb) {
       ledSubs.add(cb);
       return () => void ledSubs.delete(cb);

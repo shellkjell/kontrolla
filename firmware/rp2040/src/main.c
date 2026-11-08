@@ -3,7 +3,10 @@
 #include "hardware/adc.h"
 #include "hardware/dma.h"
 #include "hardware/gpio.h"
+#include "hardware/irq.h"
 #include "hardware/pio.h"
+#include "hardware/timer.h"
+#include "hardware/uart.h"
 #include "ws2812.pio.h"
 #include "pico/stdlib.h"
 #include "tusb.h"
@@ -32,7 +35,25 @@ static uint32_t scanCount;
 static uint32_t ledbuf[255];
 static int led_dma = -1;
 
+// ---- UART MIDI port (CONTRACTS §2.3): TX mirrors every USB message in order via a ring drained from the main loop ----
+#define TXRING 4096
+static uart_inst_t *port_uart;
+static uint8_t txring[TXRING];
+static uint16_t txh, txt;
+
+static void port_tx(uint8_t b) {
+  uint16_t n = (txh + 1) & (TXRING - 1);
+  if (port_uart && cfg.port->tx != 0xFF && n != txt) { txring[txh] = b; txh = n; }  // a full ring drops (4096 B = 1.3 s of wire time)
+}
+
+static void port_drain(void) {
+  while (txt != txh && uart_is_writable(port_uart)) { uart_putc_raw(port_uart, txring[txt]); txt = (txt + 1) & (TXRING - 1); }
+}
+
 static void midi_send(uint8_t status, uint8_t d1, uint8_t d2) {
+  port_tx(status);
+  port_tx(d1 & 0x7F);
+  port_tx(d2 & 0x7F);
   uint8_t pkt[4] = {status >> 4, status, d1 & 0x7F, d2 & 0x7F};  // cable 0, CIN = status nibble
   while (tud_mounted() && !tud_midi_n_packet_write(0, pkt)) tud_task();
 }
@@ -51,9 +72,55 @@ static int32_t floor_div(int32_t a, int32_t b) {  // b > 0
   return (a % b < 0) ? q - 1 : q;
 }
 
+// 10 us mux settle (CONTRACTS §2). Sleeping on TIMER alarm 2 instead of spinning costs ~30 instructions rather than ~800,
+// which is what lets the emulator keep real time with 60 mux reads per scan; on silicon the wake-up adds well under 1 us.
+// Race-free: with interrupts masked a pending alarm still wakes WFI, and we poll the raw alarm status ourselves.
+static void settle_nop(void) {}
+static void settle_init(void) {
+  irq_set_exclusive_handler(TIMER_IRQ_2, settle_nop);
+  irq_set_enabled(TIMER_IRQ_2, true);
+  hw_set_bits(&timer_hw->inte, 1u << 2);
+}
+static inline void sleep_us_alarm(uint32_t us) {  // us >= 2 (the 1 us timer tick must not already have passed)
+  uint32_t ps = save_and_disable_interrupts();
+  timer_hw->alarm[2] = timer_hw->timerawl + us;
+  while (!(timer_hw->ints & (1u << 2))) __wfi();
+  timer_hw->intr = 1u << 2;
+  irq_clear(TIMER_IRQ_2);  // drop the latched NVIC pending bit so it is not taken on restore
+  restore_interrupts(ps);
+}
+static inline void settle_10us(void) { sleep_us_alarm(11); }  // 1 us timer tick: +11 guarantees >= 10 us
+
+// Per-mux GPIO masks, built once: one SIO write sets S0..S3 and (on a shared SIG pin) every EN together.
+#define MUX_MAX 16
+static uint32_t mux_mask[MUX_MAX], mux_base[MUX_MAX], mux_selval[MUX_MAX][16];
+
+static void mux_tables(void) {
+  for (int i = 0; i < cfg.muxCount; i++) {
+    const MuxRec *m = &cfg.mux[i];
+    uint32_t selmask = 0, others = 0, own = 0;
+    for (int j = 0; j < 4; j++) selmask |= 1u << m->sel[j];
+    for (int ch = 0; ch < 16; ch++) {
+      uint32_t v = 0;
+      for (int j = 0; j < 4; j++) if ((ch >> j) & 1) v |= 1u << m->sel[j];
+      mux_selval[i][ch] = v;
+    }
+    if (m->en != 0xFF) {  // shared SIG pin: this mux's EN (active low) low, every other EN on that pin high
+      own = 1u << m->en;
+      for (int k = 0; k < cfg.muxCount; k++) {
+        const MuxRec *o = &cfg.mux[k];
+        if (k != i && o->sig == m->sig && o->en != 0xFF) others |= 1u << o->en;
+      }
+    }
+    mux_mask[i] = selmask | own | others;
+    mux_base[i] = others;
+  }
+}
+
 static void mux_select(const MuxRec *m, uint8_t channel) {
-  for (int i = 0; i < 4; i++) gpio_put(m->sel[i], (channel >> i) & 1);
-  busy_wait_us(10);
+  int i = m - cfg.mux;
+  gpio_put_masked(mux_mask[i], mux_base[i] | mux_selval[i][channel & 15]);
+  settle_10us();
 }
 
 static void scan_analog(const CtrlRec *c, State *s) {
@@ -63,8 +130,10 @@ static void scan_analog(const CtrlRec *c, State *s) {
     mux_select(m, c->muxChannel);
     ch = m->sig - 26;
   }
-  adc_select_input(ch);
-  int32_t raw = adc_read();
+  hw_write_masked(&adc_hw->cs, ((uint32_t)ch << ADC_CS_AINSEL_LSB) | ADC_CS_START_ONCE_BITS, ADC_CS_AINSEL_BITS | ADC_CS_START_ONCE_BITS);
+  sleep_us_alarm(3);  // conversion takes 2 us; the 1 us tick makes this 2-3 us, so READY is already set
+  while (!(adc_hw->cs & ADC_CS_READY_BITS)) tight_loop_contents();
+  int32_t raw = adc_hw->result & 0xfff;
   if (s->first) {
     s->acc = raw << 4;
   } else {
@@ -188,6 +257,39 @@ static void led_init(void) {
   dma_channel_configure(led_dma, &dc, &pio0->txf[0], ledbuf, 0, false);
 }
 
+static void midi_in(uint8_t status, uint8_t d1, uint8_t d2);
+
+// UART RX: running status accepted, real-time bytes ignored, system messages clear running status.
+static uint8_t rx_status, rx_have, rx_need, rx_d[2];
+static void port_rx_byte(uint8_t b) {
+  if (b >= 0xF8) return;
+  if (b & 0x80) {
+    rx_have = 0;
+    rx_status = b >= 0xF0 ? 0 : b;
+    rx_need = ((b & 0xE0) == 0xC0) ? 1 : 2;
+    return;
+  }
+  if (!rx_status) return;
+  rx_d[rx_have++] = b;
+  if (rx_have == rx_need) { midi_in(rx_status, rx_d[0], rx_need == 2 ? rx_d[1] : 0); rx_have = 0; }
+}
+
+static uart_inst_t *uart_for_pin(uint8_t p) {
+  return (p == 0 || p == 1 || p == 12 || p == 13 || p == 16 || p == 17) ? uart0 : uart1;
+}
+
+static void port_init(void) {
+  const PortRec *p = cfg.port;
+  uint8_t any = p->tx != 0xFF ? p->tx : p->rx;
+  if (any == 0xFF) return;
+  port_uart = uart_for_pin(any);
+  uart_init(port_uart, 31250);
+  uart_set_format(port_uart, 8, 1, UART_PARITY_NONE);
+  uart_set_fifo_enabled(port_uart, true);
+  if (p->tx != 0xFF) gpio_set_function(p->tx, GPIO_FUNC_UART);
+  if (p->rx != 0xFF) gpio_set_function(p->rx, GPIO_FUNC_UART);
+}
+
 // ---- host -> device MIDI (CONTRACTS §2.1): button feedback and meter levels, nothing echoed ----
 static void midi_in(uint8_t status, uint8_t d1, uint8_t d2) {
   uint8_t type = status & 0xF0, ch = status & 0x0F;
@@ -213,10 +315,13 @@ static void midi_in(uint8_t status, uint8_t d1, uint8_t d2) {
 }
 
 static void hw_init(void) {
+  settle_init();
+  mux_tables();
   adc_init();
   bool adc_used[3] = {0};
   for (int i = 0; i < cfg.muxCount; i++) {
     const MuxRec *m = &cfg.mux[i];
+    if (m->en != 0xFF) { gpio_init(m->en); gpio_set_dir(m->en, GPIO_OUT); gpio_put(m->en, 1); }  // start disabled
     for (int j = 0; j < 4; j++) { gpio_init(m->sel[j]); gpio_set_dir(m->sel[j], GPIO_OUT); }  // shared buses: idempotent
     if (m->digital) { gpio_init(m->sig); gpio_set_dir(m->sig, GPIO_IN); gpio_pull_up(m->sig); }
     else if (m->sig >= 26 && m->sig <= 28) adc_used[m->sig - 26] = true;
@@ -235,6 +340,7 @@ static void hw_init(void) {
   }
   for (int i = 0; i < 3; i++) if (adc_used[i]) adc_gpio_init(26 + i);
   if (cfg.led->count) led_init();
+  port_init();
 }
 
 int main(void) {
@@ -253,13 +359,22 @@ int main(void) {
     tud_task();
     uint8_t pkt[4];
     while (tud_midi_n_packet_read(0, pkt)) if (cfg.valid) midi_in(pkt[1], pkt[2], pkt[3]);
+    if (port_uart) {  // polled: at least once per scan wake-up, FIFO holds 32 B = 10 ms of wire time
+      while (uart_is_readable(port_uart)) port_rx_byte(uart_getc(port_uart));
+      port_drain();
+    }
     if (cfg.valid && !started) {
       if (!tud_mounted()) { best_effort_wfe_or_timeout(make_timeout_time_ms(1)); continue; }
       started = true;
       next = time_us_64();
     }
     uint64_t now = time_us_64();
-    if (now < next) { best_effort_wfe_or_timeout(from_us_since_boot(next)); continue; }
+    if (now < next) {
+      // While UART TX bytes are queued wake every 400 us to keep its 32-byte FIFO fed (~1 ms of wire time).
+      uint64_t wake = (txt != txh && now + 400 < next) ? now + 400 : next;
+      best_effort_wfe_or_timeout(from_us_since_boot(wake));
+      continue;
+    }
     next += 1000;
     if (cfg.valid) scan();
     else gpio_put(LED_PIN, (now / 250000) & 1);  // blink ~2 Hz

@@ -76,7 +76,9 @@ export class Rp2040Rig {
   runUntil(targetNs: number, stop?: () => boolean) {
     const { core } = this.rp;
     const clock = this.rp.clock as unknown as SimulationClockLike;
-    while (clock.nanos < targetNs && !stop?.()) {
+    // Hot loop: one iteration per instruction (or per idle jump to the next alarm).
+    while (clock.nanos < targetNs) {
+      if (stop?.()) return;
       if (core.waiting) {
         const n = clock.nanosToNextAlarm;
         clock.tick(n > 0 ? Math.min(n, targetNs - clock.nanos) : targetNs - clock.nanos);
@@ -168,6 +170,53 @@ export class Rp2040Rig {
     if (!n) return;
     this.outWaiting = 0;
     this.rp.usbCtrl.endpointReadDone(this.midiOut, Uint8Array.from(this.outQueue.splice(0, n)));
+  }
+
+  /**
+   * Hardware MIDI port. `uartIndex` is the rp2040js UART the firmware uses (0 or 1). TX bytes are parsed into messages
+   * (`onPortMidi`); RX bytes are injected at the 31250 baud byte rate (320 us each) so the 32-byte FIFO never overflows.
+   */
+  private portSubs = new Set<(msg: number[], timeMs: number) => void>();
+  private rxQueue: number[] = [];
+  private rxAlarm?: { schedule(ns: number): void };
+
+  attachPort(uartIndex: number) {
+    const uart = this.rp.uart[uartIndex]!;
+    let status = 0;
+    let data: number[] = [];
+    uart.onByte = (b) => {
+      if (b & 0x80) {
+        status = b;
+        data = [];
+        return;
+      }
+      if (!status) return;
+      data.push(b);
+      if (data.length === ((status & 0xe0) === 0xc0 ? 1 : 2)) {
+        const msg = [status, ...data];
+        data = [];
+        const t = this.timeMs;
+        this.portSubs.forEach((cb) => cb(msg, t));
+      }
+    };
+    this.rxAlarm = this.rp.clock.createAlarm(() => {
+      const b = this.rxQueue.shift();
+      if (b !== undefined) uart.feedByte(b);
+      if (this.rxQueue.length) this.rxAlarm!.schedule(320_000);
+    });
+  }
+
+  onPortMidi(cb: (msg: number[], timeMs: number) => void) {
+    this.portSubs.add(cb);
+    return () => void this.portSubs.delete(cb);
+  }
+
+  /** Raw bytes into the device's UART RX. */
+  sendPortBytes(bytes: number[]) {
+    if (!this.rxAlarm) return;
+    const idle = !this.rxQueue.length;
+    this.rxQueue.push(...bytes.map((b) => b & 0xff));
+    if (idle && this.rxQueue.length) (this.rxAlarm as unknown as { schedule(ns: number): void }).schedule(320_000);
   }
 
   /**

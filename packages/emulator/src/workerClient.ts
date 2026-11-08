@@ -28,6 +28,7 @@ export function createRp2040WorkerSim(
   const worker = makeWorker();
   const midi = new Set<(msg: number[], timeMs: number) => void>();
   const stats = new Set<(s: WorkerStats) => void>();
+  const portMidi = new Set<(msg: number[], timeMs: number) => void>();
   const leds = new Set<(rgb: Uint8Array, timeMs: number) => void>();
   const send = (m: WorkerIn, transfer: Transferable[] = []) => worker.postMessage(m, transfer);
 
@@ -44,6 +45,11 @@ export function createRp2040WorkerSim(
       turnEncoder: (id, detents) => send({ type: 'turnEncoder', id, detents }),
       advance: () => Promise.resolve(),
       sendMidi: (msg) => send({ type: 'sendMidi', msg }),
+      sendPortMidi: (bytes) => send({ type: 'sendPortMidi', bytes }),
+      onPortMidi(cb) {
+        portMidi.add(cb);
+        return () => void portMidi.delete(cb);
+      },
       onLeds(cb) {
         leds.add(cb);
         return () => void leds.delete(cb);
@@ -72,6 +78,7 @@ export function createRp2040WorkerSim(
         // Next macrotask: after the caller's synchronous setup, so stimulus set right after creation is the power-on state.
         setTimeout(() => send({ type: 'run' }), 0);
       } else if (m.type === 'midi') m.events.forEach((ev) => midi.forEach((cb) => cb(ev.msg, ev.timeMs)));
+      else if (m.type === 'portMidi') m.events.forEach((ev) => portMidi.forEach((cb) => cb(ev.msg, ev.timeMs)));
       else if (m.type === 'leds') leds.forEach((cb) => cb(m.rgb, m.timeMs));
       else if (m.type === 'stats') stats.forEach((cb) => cb(m));
       else fail(m.message);

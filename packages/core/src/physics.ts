@@ -8,13 +8,13 @@
  *
  * Readers (all in simulated ms):
  *   s.pinLevel(gpio, tMs)        -> 0 | 1   digital level (pull-ups: idle = 1, pressed button = 0)
- *   s.digitalMuxLevel(sig, ch, tMs) -> 0 | 1 level on a digital mux SIG pin for select value ch (buttons on a digital mux)
- *   s.adcRaw(gpio, muxCh?)       -> 0..4095 one noisy ADC read. gpio = the analog MCU pin (direct control or mux SIG);
- *                                   muxCh = current select value 0-15 when gpio is a mux SIG. Unwired reads 0.
+ *   s.muxLevel(muxId, ch, tMs)   -> 0 | 1   level of the button on digital mux muxId channel ch (the caller decides which mux is enabled)
+ *   s.muxRaw(muxId, ch)          -> 0..4095 one noisy ADC read of the pot/fader on analog mux muxId channel ch (unwired reads 0)
+ *   s.adcRaw(gpio)               -> 0..4095 one noisy ADC read of a direct control on that analog MCU pin. Unwired reads 0.
  *   s.analogRaw(controlId)       -> same read, by control id (used by the model).
  *
  * For rp2040js: on each GPIO input query call pinLevel(gpio, now); on each ADC sample call
- * adcRaw(26 + adcChannel, muxChannelFromSelectPins). Noise uses its own PRNG stream, bounce another;
+ * adcRaw(26 + adcChannel), or muxRaw(enabledMuxId, selectedChannel) when that SIG pin belongs to muxes. Noise uses its own PRNG stream, bounce another;
  * both are mulberry32 seeded from opts.seed (default 1).
  */
 import type { DeviceSpec, SimOptions } from './types';
@@ -45,7 +45,7 @@ export class Stimulus {
   private raw = new Map<string, number>();
   private sched = new Map<string, Ev[]>();
   private encEnd = new Map<string, number>();
-  private adcMap = new Map<string, string>(); // "gpio" or "gpio:ch" -> control id
+  private adcMap = new Map<string, string>(); // "gpio" or "m:muxId:ch" -> control id
   private ctl: Map<string, DeviceSpec['controls'][number]>;
 
   constructor(readonly spec: DeviceSpec, readonly opts: SimOptions = {}) {
@@ -58,7 +58,7 @@ export class Stimulus {
         this.raw.set(c.id, 0);
         if (c.mux) {
           const m = spec.muxes.find((x) => x.id === c.mux!.id);
-          if (m) this.adcMap.set(`${m.sigPin}:${c.mux.channel}`, c.id);
+          if (m) this.adcMap.set(`m:${m.id}:${c.mux.channel}`, c.id);
         } else if (c.pin !== undefined) this.adcMap.set(`${c.pin}`, c.id);
       }
     }
@@ -84,7 +84,7 @@ export class Stimulus {
     if (c.mux) {
       const m = this.spec.muxes.find((x) => x.id === c.mux!.id);
       if (!m) throw new Error(`unknown mux for ${id}`);
-      key = `${m.sigPin}:${c.mux.channel}`;
+      key = `m:${m.id}:${c.mux.channel}`;
     } else key = `${c.pin}`;
     if (bounce <= 0) return this.push(key, { t: tMs, level: final });
     // first edge at tMs, then 2 or 4 random flips inside the window; the last one lands on `final`
@@ -119,9 +119,9 @@ export class Stimulus {
     return this.level(`${gpio}`, tMs);
   }
 
-  /** Level seen on a digital mux SIG pin (pull-up) while the select lines address `ch`. Idle = 1, pressed = 0. */
-  digitalMuxLevel(sigGpio: number, ch: number, tMs: number): 0 | 1 {
-    return this.level(`${sigGpio}:${ch}`, tMs);
+  /** Level a button on digital mux `muxId` channel `ch` puts on the SIG pin while that mux is enabled and addresses `ch`. Idle = 1, pressed = 0. */
+  muxLevel(muxId: string, ch: number, tMs: number): 0 | 1 {
+    return this.level(`m:${muxId}:${ch}`, tMs);
   }
 
   analogRaw(id: string): number {
@@ -131,8 +131,13 @@ export class Stimulus {
     return Math.min(4095, Math.max(0, base + noise));
   }
 
-  adcRaw(gpio: number, muxCh?: number): number {
-    const id = this.adcMap.get(muxCh === undefined ? `${gpio}` : `${gpio}:${muxCh}`);
+  adcRaw(gpio: number): number {
+    const id = this.adcMap.get(`${gpio}`);
+    return id === undefined ? 0 : this.analogRaw(id);
+  }
+
+  muxRaw(muxId: string, ch: number): number {
+    const id = this.adcMap.get(`m:${muxId}:${ch}`);
     return id === undefined ? 0 : this.analogRaw(id);
   }
 }
