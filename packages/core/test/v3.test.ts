@@ -149,16 +149,21 @@ test('validate: MIDI port pins must be a legal UART pair', () => {
   expect(errs(teensy).some((m) => /Serial1 TX/.test(m))).toBe(true);
 });
 
-test('validate: scan budget warning when mux reads exceed the 1 ms period', () => {
-  const many = spec({ muxes: [{ id: 'a', part: 'mux-74hc4067', sigPin: 26, selectPins: sel, signal: 'analog' }], meters: [], leds: undefined, midiPort: undefined });
-  many.controls = Array.from({ length: 80 }, (_, i) => ({
-    id: `p${i}`, kind: 'pot' as const, part: 'pot-b10k', mux: { id: 'a', channel: i % 16 },
-    midi: { type: 'cc' as const, channel: 1, cc: i, min: 0, max: 127 }, deadband: 8, smoothing: 0,
-  }));
-  expect(validate(many).some((i) => i.severity === 'warning' && /Scan needs/.test(i.message))).toBe(true);
-  many.controls = many.controls.slice(0, 59);
-  expect(validate(many).some((i) => /Scan needs/.test(i.message) && i.severity === 'warning')).toBe(false);
-  expect(validate(many).some((i) => /Scan needs/.test(i.message) && i.severity === 'info')).toBe(true);
+test('validate: scan budget (bus-major) warns past 1 ms, always reports an estimate', () => {
+  const muxes = Array.from({ length: 13 }, (_, k) => ({ id: `a${k}`, part: 'mux-74hc4067' as const, sigPin: 26, selectPins: sel, signal: 'analog' as const, enablePin: 7 + k }));
+  const pots = (n: number) =>
+    Array.from({ length: n }, (_, i) => ({
+      id: `p${i}`, kind: 'pot' as const, part: 'pot-b10k', mux: { id: `a${i >> 4}`, channel: i % 16 },
+      midi: { type: 'cc' as const, channel: 1, cc: i % 128, min: 0, max: 127 }, deadband: 8, smoothing: 0,
+    }));
+  const big = spec({ muxes, controls: pots(208), meters: [], leds: undefined, midiPort: undefined });
+  expect(validate(big).some((i) => i.severity === 'warning' && /Scan needs/.test(i.message))).toBe(true);
+  const ok = spec({ muxes: muxes.slice(0, 4), controls: pots(59), meters: [], leds: undefined, midiPort: undefined });
+  const est = validate(ok).find((i) => /Scan needs/.test(i.message))!;
+  expect(est.severity).toBe('info');
+  // 16 channels x 10 us settle + EN switches + 59 x 3.5 us reads + 59 x 1.2 us processing
+  expect(Number(/~(\d+) µs/.exec(est.message)![1])).toBeGreaterThan(400);
+  expect(Number(/~(\d+) µs/.exec(est.message)![1])).toBeLessThan(600);
 });
 
 test('teensy sketch: EN handling and Serial1 mirror/input', () => {

@@ -45,10 +45,7 @@ export function createModelDevice(spec: DeviceSpec, opts: SimOptions = {}): Devi
   const cc = (c: { midi: { channel: number; cc?: number } }, v: number) => emit([0xb0 | (c.midi.channel - 1), c.midi.cc!, v]);
 
   function button(c: Extract<Control, { kind: 'button' }>, s: St) {
-    let raw: 0 | 1;
-    if (c.mux) {
-      raw = stim.muxLevel(c.mux.id, c.mux.channel, now);
-    } else raw = stim.pinLevel(c.pin!, now);
+    const raw = (c.mux ? pre[ci(c.id)]! : stim.pinLevel(c.pin!, now)) as 0 | 1;
     if (raw === s.stable) return void (s.counter = 0);
     s.counter++;
     if (c.debounceMs !== 0 && s.counter < c.debounceMs) return;
@@ -70,7 +67,7 @@ export function createModelDevice(spec: DeviceSpec, opts: SimOptions = {}): Devi
   }
 
   function analog(c: Extract<Control, { kind: 'pot' | 'fader' }>, s: St) {
-    const raw = stim.analogRaw(c.id);
+    const raw = c.mux ? pre[ci(c.id)]! : stim.analogRaw(c.id);
     const k = 256 - c.smoothing;
     s.acc = s.first ? raw << 4 : s.acc + ((((raw << 4) - s.acc) * k) >> 8);
     const sv = s.acc >> 4;
@@ -131,7 +128,22 @@ export function createModelDevice(spec: DeviceSpec, opts: SimOptions = {}): Devi
     return rgb;
   }
 
+  // Bus-major pre-pass (CONTRACTS §2.4): every mux control is sampled at the start of the scan, ordered by
+  // (select bus, channel, mux, record order); only that order matters to the (seeded) noise stream.
+  const idx = new Map(spec.controls.map((c, i) => [c.id, i]));
+  const ci = (id: string) => idx.get(id)!;
+  const busOf = spec.muxes.map((m, i) => spec.muxes.findIndex((o) => o.selectPins.join() === m.selectPins.join()));
+  const reads = spec.controls
+    .flatMap((c, i) => (c.kind !== 'encoder' && c.mux ? [{ c, i, mux: spec.muxes.findIndex((m) => m.id === c.mux!.id), ch: c.mux.channel }] : []))
+    .sort((a, b) => busOf[a.mux]! - busOf[b.mux]! || a.ch - b.ch || a.mux - b.mux || a.i - b.i);
+  const pre: number[] = spec.controls.map(() => 0);
+
   function scan() {
+    for (const r of reads) {
+      const c = r.c;
+      if (c.kind === 'button') pre[r.i] = stim.muxLevel(c.mux!.id, r.ch, now);
+      else pre[r.i] = stim.analogRaw(c.id);
+    }
     spec.controls.forEach((c, i) => {
       const s = state[i]!;
       if (c.kind === 'button') button(c, s);

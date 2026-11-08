@@ -173,16 +173,28 @@ test('validate: LED indices, overlap, meter range', () => {
   expect(msgs(dup).some((m) => /LED 0 is claimed by both b0 and b3/.test(m))).toBe(true);
 });
 
-test('validate: 5 V budget warning gives a safe brightness; level-shifter info', () => {
-  const s = spec({ leds: { part: 'led-ws2812', pin: 16, count: 100, brightness: 255 } });
-  s.controls = [btn('b0', 0)];
-  s.meters = [];
+test('validate: 5 V budget uses real per-LED colours; safe-brightness hint; PD budget with audio', () => {
+  // 10 meters x 10 segments: 6 green (1.0), 3 amber (1.627), 1 red (1.0) => F = 118.8 full-scale channels, plus 1 mA idle each
+  const meters = Array.from({ length: 10 }, (_, i) => ({ id: `m${i}`, part: 'meter-bar', ledStart: i * 10, ledCount: 10, midi: { channel: 1, cc: i } }));
+  const s = spec({ leds: { part: 'led-ws2812', pin: 16, count: 100, brightness: 255 }, meters });
+  s.controls = [];
   const w = validate(s).find((i) => i.severity === 'warning' && /5 V/.test(i.message))!;
-  expect(w.message).toContain('6100 mA');
-  expect(w.fix).toContain('brightness to 12'); // floor(255 * (400/100 - 1) / 60)
+  expect(w.message).toContain('2476 mA');
+  expect(w.message).toContain('budget 400 mA');
+  expect(w.fix).toContain('brightness to 32'); // floor(255 * (400 - 100) / (20 * 118.8))
   expect(validate(s).some((i) => i.severity === 'info' && /74AHCT125/.test(i.message))).toBe(true);
-  s.leds!.brightness = 12; // the suggested safe value
+  s.leds!.brightness = 32; // the suggested safe value
   expect(validate(s).some((i) => i.severity === 'warning' && /5 V/.test(i.message))).toBe(false);
+  // with an audio engine the device is USB-C PD powered: 2500 mA, stated in the message
+  const pd = { ...s, leds: { ...s.leds!, brightness: 255 }, audio: { board: 'x', channels: [], master: { bind: {}, outputs: [] } } };
+  const info = validate(pd).find((i) => /5 V/.test(i.message) && /LEDs worst case/.test(i.message))!;
+  expect(info.severity).toBe('info');
+  expect(info.message).toContain('USB-C PD');
+  expect(info.message).toContain('2500 mA');
+  // button LEDs count in their own colour; white = 3 channels
+  const one = spec({ leds: { part: 'led-ws2812', pin: 16, count: 1, brightness: 255 }, meters: [] });
+  one.controls = [btn('b0', 0, { led: { index: 0, color: '#ffffff' } })];
+  expect(validate(one).find((i) => /LEDs worst case/.test(i.message))!.message).toContain('61 mA');
 });
 
 test('teensy sketch carries mux buttons, feedback handler and LEDs', async () => {

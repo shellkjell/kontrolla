@@ -19,6 +19,7 @@ static Config cfg;
 typedef struct {
   // analog
   bool first;
+  int16_t pre;  // mux controls: raw sampled by the bus-major pre-pass (analog 0..4095, button 1 = pressed)
   int32_t acc, lastS, lastV;
   // button
   bool stable, on, ledOn;
@@ -93,7 +94,7 @@ static inline void settle_10us(void) { sleep_us_alarm(11); }  // 1 us timer tick
 
 // Per-mux GPIO masks, built once: one SIO write sets S0..S3 and (on a shared SIG pin) every EN together.
 #define MUX_MAX 16
-static uint32_t mux_mask[MUX_MAX], mux_base[MUX_MAX], mux_selval[MUX_MAX][16];
+static uint32_t mux_mask[MUX_MAX], mux_base[MUX_MAX], mux_selmask[MUX_MAX], mux_selval[MUX_MAX][16];
 
 static void mux_tables(void) {
   for (int i = 0; i < cfg.muxCount; i++) {
@@ -112,28 +113,80 @@ static void mux_tables(void) {
         if (k != i && o->sig == m->sig && o->en != 0xFF) others |= 1u << o->en;
       }
     }
+    mux_selmask[i] = selmask;
     mux_mask[i] = selmask | own | others;
     mux_base[i] = others;
   }
 }
 
-static void mux_select(const MuxRec *m, uint8_t channel) {
-  int i = m - cfg.mux;
-  gpio_put_masked(mux_mask[i], mux_base[i] | mux_selval[i][channel & 15]);
-  settle_10us();
+// ---- bus-major mux pre-pass (CONTRACTS §2.4) ----
+// Every control on a mux is sampled once per scan, ordered by (select bus, channel, mux, control): S0..S3 are set once per
+// (bus, channel) and settle 10 us, then each mux with a control there is read. Muxes sharing a SIG pin switch EN
+// (settle ~1 us) when the previous read on that pin was another mux. Processing then runs in record order, as before.
+static uint8_t rd_ctrl[256], rd_mux[256], rd_ch[256], rd_bus[256];
+static bool rd_new[256];
+static int rd_n;
+static int8_t en_owner[30];  // SIG GPIO -> mux whose EN is currently low (-1 = none)
+
+static void reads_init(void) {
+  uint8_t bus[MUX_MAX];
+  for (int i = 0; i < cfg.muxCount; i++) {  // bus id = first mux with the same four select pins
+    bus[i] = i;
+    for (int k = 0; k < i; k++)
+      if (!memcmp(cfg.mux[k].sel, cfg.mux[i].sel, 4)) { bus[i] = bus[k]; break; }
+  }
+  for (int i = 0; i < 30; i++) en_owner[i] = -1;
+  for (int i = 0; i < cfg.controlCount; i++) {
+    const CtrlRec *c = &cfg.ctrl[i];
+    if (c->kind == 3 || c->muxIndex == 0xFF) continue;
+    int j = rd_n++;  // insertion sort by (bus, channel, mux, control)
+    while (j > 0) {
+      int pm = rd_mux[j - 1], pc = rd_ch[j - 1];
+      bool after = bus[pm] < bus[c->muxIndex] || (bus[pm] == bus[c->muxIndex] && (pc < c->muxChannel || (pc == c->muxChannel && pm <= c->muxIndex)));
+      if (after) break;
+      rd_ctrl[j] = rd_ctrl[j - 1]; rd_mux[j] = rd_mux[j - 1]; rd_ch[j] = rd_ch[j - 1]; rd_bus[j] = rd_bus[j - 1];
+      j--;
+    }
+    rd_ctrl[j] = i; rd_mux[j] = c->muxIndex; rd_ch[j] = c->muxChannel; rd_bus[j] = bus[c->muxIndex];
+  }
+  for (int k = 0; k < rd_n; k++) rd_new[k] = k == 0 || rd_bus[k] != rd_bus[k - 1] || rd_ch[k] != rd_ch[k - 1];
+}
+
+static void mux_prepass(void) {
+  for (int k = 0; k < rd_n; k++) {
+    int i = rd_mux[k];
+    const MuxRec *m = &cfg.mux[i];
+    if (rd_new[k]) {  // new (bus, channel): S0..S3 (+ this mux's EN state) in one write, then the 10 us settle
+      gpio_put_masked(mux_mask[i], mux_base[i] | mux_selval[i][rd_ch[k] & 15]);
+      if (m->en != 0xFF) en_owner[m->sig] = i;
+      settle_10us();
+    } else if (m->en != 0xFF && en_owner[m->sig] != i) {  // same select, another mux on a shared SIG pin: EN only
+      gpio_put_masked(mux_mask[i] & ~mux_selmask[i], mux_base[i]);
+      en_owner[m->sig] = i;
+      sleep_us_alarm(2);  // EN-to-output ~0.1 us on a 74HC4067; the 1 us tick makes this 1-2 us
+    }
+    State *s = &st[rd_ctrl[k]];
+    if (m->digital) {
+      s->pre = !gpio_get(m->sig);
+    } else {
+      hw_write_masked(&adc_hw->cs, ((uint32_t)(m->sig - 26) << ADC_CS_AINSEL_LSB) | ADC_CS_START_ONCE_BITS, ADC_CS_AINSEL_BITS | ADC_CS_START_ONCE_BITS);
+      sleep_us_alarm(3);  // conversion takes 2 us; the 1 us tick makes this 2-3 us, so READY is already set
+      while (!(adc_hw->cs & ADC_CS_READY_BITS)) tight_loop_contents();
+      s->pre = adc_hw->result & 0xfff;
+    }
+  }
 }
 
 static void scan_analog(const CtrlRec *c, State *s) {
-  uint8_t ch = c->pinA;
+  int32_t raw;
   if (c->muxIndex != 0xFF) {
-    const MuxRec *m = &cfg.mux[c->muxIndex];
-    mux_select(m, c->muxChannel);
-    ch = m->sig - 26;
+    raw = s->pre;
+  } else {
+    hw_write_masked(&adc_hw->cs, ((uint32_t)c->pinA << ADC_CS_AINSEL_LSB) | ADC_CS_START_ONCE_BITS, ADC_CS_AINSEL_BITS | ADC_CS_START_ONCE_BITS);
+    sleep_us_alarm(3);
+    while (!(adc_hw->cs & ADC_CS_READY_BITS)) tight_loop_contents();
+    raw = adc_hw->result & 0xfff;
   }
-  hw_write_masked(&adc_hw->cs, ((uint32_t)ch << ADC_CS_AINSEL_LSB) | ADC_CS_START_ONCE_BITS, ADC_CS_AINSEL_BITS | ADC_CS_START_ONCE_BITS);
-  sleep_us_alarm(3);  // conversion takes 2 us; the 1 us tick makes this 2-3 us, so READY is already set
-  while (!(adc_hw->cs & ADC_CS_READY_BITS)) tight_loop_contents();
-  int32_t raw = adc_hw->result & 0xfff;
   if (s->first) {
     s->acc = raw << 4;
   } else {
@@ -159,9 +212,7 @@ static void scan_analog(const CtrlRec *c, State *s) {
 static void scan_button(const CtrlRec *c, State *s) {
   bool raw;  // pressed = low
   if (c->muxIndex != 0xFF) {
-    const MuxRec *m = &cfg.mux[c->muxIndex];
-    mux_select(m, c->muxChannel);
-    raw = !gpio_get(m->sig);
+    raw = s->pre;
   } else {
     raw = !gpio_get(c->pinA);
   }
@@ -201,6 +252,7 @@ static void scan_encoder(const CtrlRec *c, State *s) {
 }
 
 void scan(void) {
+  mux_prepass();
   for (int i = 0; i < cfg.controlCount; i++) {
     const CtrlRec *c = &cfg.ctrl[i];
     if (c->kind == 1) scan_analog(c, &st[i]);
@@ -317,6 +369,7 @@ static void midi_in(uint8_t status, uint8_t d1, uint8_t d2) {
 static void hw_init(void) {
   settle_init();
   mux_tables();
+  reads_init();
   adc_init();
   bool adc_used[3] = {0};
   for (int i = 0; i < cfg.muxCount; i++) {

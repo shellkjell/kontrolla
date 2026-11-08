@@ -86,13 +86,13 @@ each scan, and every MIDI message is emitted immediately in that order.
 
 Muxes with an `enablePin` (74HC4067 EN, **active low**) start disabled (EN high). To read a channel of a mux that has an EN pin, the firmware first drives
 the EN of every *other* mux that shares its SIG pin high and its own EN low, then drives S0..S3, waits 10 µs and reads. The same applies to digital muxes.
-The SIG pin therefore carries exactly the selected channel of the one enabled mux. Validation requires every mux on a shared SIG pin to have its own EN pin
+The SIG pin therefore carries exactly the selected channel of the one enabled mux (when the reads happen is described in §2.4). Validation requires every mux on a shared SIG pin to have its own EN pin
 (all of the same signal type); an emulator that sees none or several enabled reads 0 (analog) or a floating-high pin (digital).
 
 ### Analog (pot/fader)
 
-The raw value `raw` is 0..4095. For a mux control: drive S0..S3 to
-`channel` bits (S0 = LSB), wait 10 µs, then read the mux's SIG ADC channel (and see *Mux enable* below).
+The raw value `raw` is 0..4095. For a mux control the raw value comes from the scan's mux pre-pass (§2.4): S0..S3 driven to
+`channel` bits (S0 = LSB), 10 µs wait, then the mux's SIG ADC channel read (see *Mux enable* below).
 
 ```
 k   = 256 - smoothing
@@ -106,8 +106,8 @@ else if v != lastV && |s - lastS| >= deadband: send CC(v); lastV = v; lastS = s
 
 ### Button
 
-The input uses the internal pull-up, so **pressed = pin low**. A button on a **digital mux** is read like a mux
-analog control: drive S0..S3 to `channel` (S0 = LSB), wait 10 µs, then read the mux's SIG GPIO (pull-up enabled); pressed = low.
+The input uses the internal pull-up, so **pressed = pin low**. A button on a **digital mux** is sampled in the mux
+pre-pass (§2.4): S0..S3 driven to `channel` (S0 = LSB), 10 µs wait, then the mux's SIG GPIO read (pull-up enabled); pressed = low.
 It then follows the same debounce logic as a direct button.
 
 ```
@@ -171,12 +171,26 @@ GRB on the wire, 800 kHz, driven by PIO on the chain pin. LED state:
   `0xC0`/`0xD0` messages take 1 data byte, the rest 2. There is **no echo and no thru**.
 - `DeviceSim.onPortMidi(cb)` reports every mirrored UART TX message; `DeviceSim.sendPortMidi(bytes)` injects raw RX bytes (running status allowed).
 
-### 2.4 Scan budget
+### 2.4 Scan: bus-major mux sampling, and its budget
 
-A mux read costs ≥ 10 µs settle plus a 2 µs ADC conversion and ~2 µs of code, about **14 µs per analog mux read** (measured in rp2040js: 14.0 µs) and ~12 µs per digital one.
-Scan period is **not** changed: 59 analog mux reads need ~0.83 ms of the 1 ms period. If the sum exceeds 1 ms the firmware's next scan simply starts late, so debounce counts
-and encoder sampling run slower than 1 ms; validation warns once the estimate passes 1000 µs (ceiling ≈ 70 analog mux reads).
-The firmware sleeps (timer alarm + WFI) during the settle and the conversion rather than spinning.
+Each scan has two phases:
+
+1. **Mux pre-pass.** Every control that sits on a mux (analog or digital) is sampled once, in this order: by *select bus* (muxes with identical `selectPins` form one bus,
+   numbered by the first mux that uses them), then by channel 0..15, then by mux (spec order), then by control (record order). Channels with no control on them are skipped.
+   For each (bus, channel) the firmware writes S0..S3 once and waits **10 µs**; every control at that channel is then read. When the next read is on another mux that shares the
+   same SIG pin, EN is switched first (this mux low, the others on that pin high) and the firmware waits **~1 µs** (the 74HC4067 enable-to-output time is ~0.1 µs; a 1 µs timer tick makes the wait 1-2 µs).
+   The first mux read at a (bus, channel) has its EN set in the same write as the select pins, so it needs no extra wait. An analog read starts one ADC conversion (2 µs).
+2. **Processing.** Controls are then processed in **record order** exactly as §2 describes (direct pins and encoders are read here), using the values sampled in phase 1.
+   Emitted MIDI order and all other semantics are therefore unchanged by the sampling order.
+
+The model samples mux controls at the start of the scan in the same order. This only matters for the seeded noise stream (one draw per analog read: mux controls in the order above,
+then direct analog controls in record order), which makes noise-on runs identical between firmware and model.
+
+**Budget** (estimated by `validate`, measured in rp2040js on the Portable Mixer 6 preset: 59 analog + 26 digital mux controls, 6 muxes on one bus, 16 channels):
+`10 µs × (bus, channel) groups + ~2 µs per EN switch + ~3.5 µs per analog mux read + ~0.5 µs per digital mux read + ~1.2 µs processing per control (+4.5 µs per direct analog, +0.5 µs per direct button)`.
+The preset estimates ~505 µs; the emulated firmware measures ~462 µs from the first select write to idle (it also runs `tud_task`, UART draining and, every 10th scan, a LED frame build outside that).
+The scan period is **not** changed: if the sum exceeds 1 ms the next scan simply starts late, so debounce counts and encoder sampling run slower than 1 ms; validation warns past 1000 µs.
+The firmware sleeps (timer alarm + WFI) during every settle and conversion rather than spinning.
 
 ## 3. Stimulus (shared physical layer, `packages/core/src/physics.ts`)
 

@@ -143,14 +143,31 @@ export function validate(spec: DeviceSpec): Issue[] {
     else for (let i = 0; i < m.ledCount; i++) claim(m.ledStart + i, m.id);
   }
   if (leds && isInt(leds.count, 1, 255) && isInt(leds.brightness, 0, 255)) {
-    // WS2812: ~1 mA idle + up to 60 mA per LED at full white, scaled by brightness. VBUS ~500 mA, 100 mA reserved for the board.
-    const BUDGET = 400;
-    const worst = count * (1 + (60 * leds.brightness) / 255);
+    // WS2812: each colour channel draws up to 20 mA at full scale, ~1 mA idle per LED. Worst case = everything lit at once:
+    // a button LED in its colour, a meter segment in its fixed green/amber/red (CONTRACTS §2.2), unreferenced LEDs dark.
+    // Powered from USB VBUS (~500 mA, 100 mA reserved for the board) unless an audio engine is present: then the device
+    // is assumed to be USB-C PD powered through a 5 V buck, with 2500 mA available for LEDs.
+    const BUDGET = spec.audio ? 2500 : 400;
+    const source = spec.audio ? 'USB-C PD + 5 V buck assumed, 2500 mA' : '~500 mA USB, 100 mA reserved';
+    const fullScale = new Array<number>(count).fill(0); // sum of channel/255 per LED at its worst colour
+    for (const c of spec.controls)
+      if (c.kind === 'button' && c.led && isInt(c.led.index, 0, count - 1) && /^#[0-9a-fA-F]{6}$/.test(c.led.color)) {
+        const n = parseInt(c.led.color.slice(1), 16);
+        fullScale[c.led.index] = ((n >> 16) + ((n >> 8) & 255) + (n & 255)) / 255;
+      }
+    for (const m of meters)
+      for (let i = 0; i < m.ledCount; i++) {
+        const idx = m.ledStart + i;
+        if (idx < 0 || idx >= count) continue;
+        fullScale[idx] = i * 10 < m.ledCount * 6 ? 1 : i * 20 < m.ledCount * 17 ? 1 + 160 / 255 : 1;
+      }
+    const F = fullScale.reduce((a, b) => a + b, 0);
+    const worst = count + (20 * F * leds.brightness) / 255;
     if (worst > BUDGET) {
-      const safe = Math.max(0, Math.floor((255 * (BUDGET / count - 1)) / 60));
-      add('warning', `LEDs worst case ~${worst.toFixed(0)} mA from 5 V (budget ${BUDGET} mA of ~500 mA USB, 100 mA reserved)`, undefined,
+      const safe = Math.max(0, Math.min(255, Math.floor((255 * (BUDGET - count)) / (20 * F))));
+      add('warning', `LEDs worst case ~${worst.toFixed(0)} mA from 5 V (budget ${BUDGET} mA: ${source})`, undefined,
         `Lower LED brightness to ${safe} or less, or use fewer LEDs / an external 5 V supply`);
-    } else add('info', `LEDs worst case ~${worst.toFixed(0)} mA from 5 V (budget ${BUDGET} mA)`);
+    } else add('info', `LEDs worst case ~${worst.toFixed(0)} mA from 5 V (budget ${BUDGET} mA: ${source})`);
     add('info', 'WS2812 data wants 5 V logic: add a 74AHCT125 level shifter on the 3V3 data line (or use SK6812, which accepts 3V3 data)');
   }
 
@@ -174,18 +191,31 @@ export function validate(spec: DeviceSpec): Issue[] {
     }
   }
 
-  // Scan budget: every mux read waits 10 us, ADC conversions take ~2 us, plus ~2 us of code. The scan period is 1 ms.
+  // Scan budget, bus-major (CONTRACTS §2.4). Mux controls are sampled in (select bus, channel, mux, record) order:
+  // 10 us settle per (bus, channel) with a control on it, 1-2 us per EN switch on a shared SIG pin, ~3.5 us per analog
+  // mux read (2-3 us conversion + code) and ~0.5 us per digital one; then ~1.2 us of processing per control.
   {
+    const busOf = spec.muxes.map((m) => spec.muxes.findIndex((o) => o.selectPins.join() === m.selectPins.join()));
+    const reads = spec.controls
+      .flatMap((c, i) => (c.kind !== 'encoder' && c.mux ? [{ c, i, mux: spec.muxes.findIndex((m) => m.id === c.mux!.id), ch: c.mux.channel }] : []))
+      .filter((r) => r.mux >= 0)
+      .sort((a, b) => busOf[a.mux]! - busOf[b.mux]! || a.ch - b.ch || a.mux - b.mux || a.i - b.i);
     let us = 0;
-    for (const c of spec.controls) {
-      if (c.kind === 'encoder') us += 1;
-      else if (c.mux) us += 10 + 2 + (c.kind === 'button' ? 0 : 2); // settle + code (+ ADC conversion); measured 14 us per analog read in rp2040js
-      else us += c.kind === 'button' ? 1 : 3.5;
-    }
+    const owner = new Map<number, number>();
+    reads.forEach((r, k) => {
+      const m = spec.muxes[r.mux]!;
+      const prev = reads[k - 1];
+      const isNew = !prev || busOf[prev.mux] !== busOf[r.mux] || prev.ch !== r.ch;
+      if (isNew) us += 10;
+      else if (m.enablePin !== undefined && owner.get(m.sigPin) !== r.mux) us += 2;
+      if (m.enablePin !== undefined) owner.set(m.sigPin, r.mux);
+      us += r.c.kind === 'button' ? 0.5 : 3.5;
+    });
+    for (const c of spec.controls) us += 1.2 + (c.kind === 'encoder' ? 0 : c.mux ? 0 : c.kind === 'button' ? 0.5 : 4.5);
     if (us > 1000)
       add('warning', `Scan needs ~${us.toFixed(0)} µs but the scan period is 1000 µs: the real scan period stretches to ~${(us / 1000).toFixed(1)} ms (debounce counts and encoder sampling slow down)`, undefined,
         'Move buttons to direct pins, drop mux channels, or split the controls over a second board');
-    else if (us > 700) add('info', `Scan needs ~${us.toFixed(0)} µs of the 1000 µs scan period`);
+    else add('info', `Scan needs ~${us.toFixed(0)} µs of the 1000 µs scan period`);
   }
 
   for (const [pin, who] of usage)
