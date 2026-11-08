@@ -1,6 +1,6 @@
 import { expect, test } from 'bun:test';
 import type { DeviceSpec } from '../src';
-import { EXAMPLES, allocatePins, autoLayout, bom, buildSteps, duplicateGroup, ensureLayout, groupOf, nextFreeMidi, validate, validateLayout } from '../src';
+import { AUDIO_BOARDS, EXAMPLES, IO_MODULES, PARTS, allocatePins, autoLayout, bom, buildSteps, cutoutsOf, duplicateGroup, ensureLayout, groupOf, nextFreeMidi, validate, validateAudio, validateLayout } from '../src';
 
 const errors = (s: Parameters<typeof validate>[0]) => validate(s).filter((i) => i.severity === 'error');
 
@@ -158,4 +158,142 @@ test('bom: MIDI jack parts and build steps mention the rear wall', () => {
   const s = allocatePins(EXAMPLES['mixer-6ch']!);
   expect(bom(s).items.some((i) => i.part === 'midi-trs-a')).toBe(true);
   expect(buildSteps(s).some((x) => x.title.includes('MIDI'))).toBe(true);
+});
+
+// ---- audio I/O ----
+
+test('catalog: every I/O module is self-consistent and fits the slot plate', () => {
+  const ids = new Set<number | null>();
+  for (const m of Object.values(IO_MODULES)) {
+    expect(m.maturityNote, m.id).toBeTruthy();
+    expect(m.connectors.length, m.id).toBeGreaterThan(0);
+    if (m.direction === 'out') expect(m.bus, m.id).toBeDefined();
+    if (m.direction === 'in') expect(m.inputs?.length, m.id).toBe(m.selectable ? 2 : 1);
+    if (m.mount === 'top') {
+      for (const c of m.connectors) expect(PARTS[c.part]?.footprint?.face, c.part).toBeUndefined(); // top-panel parts
+      continue;
+    }
+    expect(ids.has(m.idOhm), `${m.id} id resistor is unique`).toBe(false);
+    ids.add(m.idOhm);
+    // connectors stay inside the 32 x 66 opening and do not overlap each other
+    for (const c of m.connectors) {
+      const fp = PARTS[c.part]?.footprint;
+      expect(fp?.face, c.part).toBe('rear');
+      const w = fp!.cap.shape === 'circle' ? fp!.cap.d : fp!.cap.w;
+      const h = fp!.cap.shape === 'circle' ? fp!.cap.d : fp!.cap.h;
+      expect(Math.abs(c.dx) + w / 2, `${m.id} ${c.label} width`).toBeLessThanOrEqual(16 + 1e-9);
+      expect(Math.abs(c.dy) + h / 2, `${m.id} ${c.label} height`).toBeLessThanOrEqual(33 + 1e-9);
+    }
+    for (const a of m.connectors) for (const b of m.connectors) {
+      if (a === b) continue;
+      const sz = (c: typeof a) => { const cap = PARTS[c.part]!.footprint!.cap; return cap.shape === 'circle' ? [cap.d, cap.d] : [cap.w, cap.h]; };
+      const [aw, ah] = sz(a) as [number, number];
+      const [bw, bh] = sz(b) as [number, number];
+      expect(Math.abs(a.dx - b.dx) >= (aw + bw) / 2 - 1e-9 || Math.abs(a.dy - b.dy) >= (ah + bh) / 2 - 1e-9, `${m.id}: ${a.label} vs ${b.label}`).toBe(true);
+    }
+  }
+  // ID ladder with a 10 k pull-up: neighbours at least 150 ADC counts apart
+  const counts = [...new Set([...ids].map((r) => (r === null ? 4095 : Math.round((r / (r + 10000)) * 4095))))].sort((a, b) => a - b);
+  for (let i = 1; i < counts.length; i++) expect(counts[i]! - counts[i - 1]!).toBeGreaterThan(150);
+});
+
+test('catalog: audio boards, maturity flags', () => {
+  expect(AUDIO_BOARDS['teensy41-cs42448']).toMatchObject({ maturity: 'proven', inputs: 6, outputs: 8, stereoChannels: 3 });
+  expect(AUDIO_BOARDS['teensy41-cs42448x2']).toMatchObject({ maturity: 'experimental', inputs: 12, outputs: 16, stereoChannels: 6 });
+  expect(AUDIO_BOARDS['teensy41-cs42448x2']!.maturityNote).toContain('UNPROVEN');
+  expect(PARTS['midi-trs-a']!.wiring.join(' ')).toContain('33 ohm');
+  expect(PARTS['midi-trs-a']!.wiring.join(' ')).toContain('10 ohm');
+});
+
+test('mixer presets: audio bindings point at real controls and meters; no validation errors', () => {
+  for (const name of ['mixer-6ch', 'mixer-3ch']) {
+    const spec = allocatePins(EXAMPLES[name]!);
+    expect(validateAudio(spec).filter((i) => i.severity === 'error'), name).toEqual([]);
+    expect(validate(spec).filter((i) => i.severity === 'error'), name).toEqual([]);
+    expect(validateLayout(spec).filter((i) => i.severity !== 'info'), name).toEqual([]);
+    const ids = new Set([...spec.controls.map((c) => c.id), ...spec.meters!.map((m) => m.id)]);
+    for (const ch of spec.audio!.channels) {
+      expect(Object.keys(ch.bind).sort(), ch.id).toEqual(['cue', 'eqHi', 'eqHiMid', 'eqLo', 'eqLoMid', 'fader', 'filter', 'fxSend', 'gain', 'inputSelect', 'mute', 'pan', 'solo']);
+      for (const id of Object.values(ch.bind)) expect(ids.has(id!), id).toBe(true);
+      expect(ids.has(ch.meter!), ch.meter).toBe(true);
+      expect(spec.ioSlots!.some((s) => s.id === ch.slot)).toBe(true);
+    }
+    expect(Object.keys(spec.audio!.master.bind).sort()).toEqual(['booth', 'cueMix', 'fxReturn', 'master', 'phones']);
+    expect(spec.audio!.master.meters).toEqual({ left: 'master-meter-l', right: 'master-meter-r' });
+  }
+});
+
+test('mixer-6ch is the unproven 2-codec board with mixed input modules, mixer-3ch the proven one', () => {
+  const six = EXAMPLES['mixer-6ch']!;
+  expect(six.audio!.board).toBe('teensy41-cs42448x2');
+  expect(six.ioSlots!.map((s) => s.module)).toEqual(['io-trs-rca-combo', 'io-trs-rca-combo', 'io-trs-rca-combo', 'io-trs-rca-combo', 'io-xlr', 'io-dual-xlr']);
+  expect(validateAudio(six).some((i) => i.severity === 'warning' && i.message.includes('UNPROVEN'))).toBe(true);
+  const three = EXAMPLES['mixer-3ch']!;
+  expect(three.name).toBe('Portable Mixer 3 — proven');
+  expect(three.audio!.board).toBe('teensy41-cs42448');
+  expect(three.audio!.channels.length).toBe(3);
+  expect(validateAudio(three).some((i) => i.severity === 'warning')).toBe(false);
+  expect(three.groups!.filter((g) => g.kind === 'strip').length).toBe(3);
+});
+
+test('validateAudio catches bad bindings, wrong direction and too many inputs', () => {
+  const s = structuredClone(EXAMPLES['mixer-3ch']!);
+  s.audio!.channels[0]!.bind.gain = 'nope';
+  s.audio!.channels[1]!.meter = 'nope-meter';
+  s.ioSlots![2]!.module = 'out-booth';
+  const errs = validateAudio(s).filter((i) => i.severity === 'error').map((i) => i.message);
+  expect(errs.some((m) => m.includes('"nope"'))).toBe(true);
+  expect(errs.some((m) => m.includes('nope-meter'))).toBe(true);
+  expect(errs.some((m) => m.includes('output module'))).toBe(true);
+  const big = structuredClone(EXAMPLES['mixer-3ch']!);
+  big.ioSlots!.forEach((x) => (x.module = 'io-dual-xlr'));
+  big.audio!.board = 'teensy41-cs42448';
+  big.audio!.channels.push({ id: 'x', label: 'X', slot: 'x-io', stereo: true, bind: {} });
+  big.ioSlots!.push({ id: 'x-io', module: 'io-rca' });
+  expect(validateAudio(big).some((i) => i.severity === 'error' && i.message.includes('codec inputs'))).toBe(true);
+});
+
+test('rear layout: one slot per channel behind its strip, master outputs after, all fit the wall', () => {
+  const six = allocatePins(EXAMPLES['mixer-6ch']!);
+  const lay = six.layout!;
+  const gainX = (n: number) => lay.placements[`ch${n}-gain`]!.x;
+  for (let n = 1; n <= 6; n++) {
+    const slot = lay.placements[`ch${n}-io`]!;
+    expect(slot.face).toBe('rear');
+    expect(Math.abs(slot.x - gainX(n))).toBeLessThan(1);
+  }
+  const masters = ['out-trs-rca-combo', 'out-xlr-pair', 'out-booth'].map((m) => lay.placements[`master:${m}`]!);
+  expect(masters.every((p) => p.face === 'rear' && p.x > lay.placements['ch6-io']!.x)).toBe(true);
+  // the rear wall is tall enough for the 80 mm slot row plus the service row, the front stays low
+  expect(lay.panel.height - 2 * lay.panel.thickness).toBeGreaterThanOrEqual(84);
+  expect(lay.panel.frontHeight!).toBeLessThanOrEqual(24);
+  for (const c of cutoutsOf(six, 'rear')) {
+    const hw = (c.d ?? c.w!) / 2;
+    expect(c.x - hw).toBeGreaterThanOrEqual(3);
+    expect(c.x + hw).toBeLessThanOrEqual(lay.panel.width - 3);
+    expect(c.y - (c.d ?? c.h!) / 2).toBeGreaterThanOrEqual(lay.panel.thickness + 2);
+    expect(c.y + (c.d ?? c.h!) / 2).toBeLessThanOrEqual(lay.panel.height - lay.panel.thickness - 2);
+  }
+  // a rear that is too short for a slot is an error
+  const short = structuredClone(six);
+  short.layout!.panel.height = 40;
+  expect(validateLayout(short).some((i) => i.severity === 'error')).toBe(true);
+});
+
+test('bom: audio board, power board and modules with maturity flags; build steps put power first', () => {
+  const six = allocatePins(EXAMPLES['mixer-6ch']!);
+  const b = bom(six);
+  expect(b.items.some((i) => i.section?.startsWith('Audio engine') && i.maturity === 'experimental')).toBe(true);
+  expect(b.items.some((i) => i.section === 'Power board')).toBe(true);
+  expect(b.items.some((i) => i.section?.includes('io-dual-xlr') && i.partNumber.includes('NC3FD-L-1'))).toBe(true);
+  expect(b.items.some((i) => i.section?.startsWith('Master out'))).toBe(true);
+  expect(b.wiring.some((r) => r.control.includes('io-xlr'))).toBe(true);
+  expect(b.wiring.find((r) => r.control === 'MIDI port')!.connections.join(' ')).toMatch(/33 ohm.*\n?.*10 ohm|33 ohm/);
+  const titles = buildSteps(six).map((s) => s.title);
+  const i = titles.findIndex((t) => t.startsWith('Audio 1/5'));
+  expect(i).toBeGreaterThan(-1);
+  expect(titles.findIndex((t) => t.startsWith('Audio 2/5'))).toBeGreaterThan(i);
+  expect(titles.findIndex((t) => t.startsWith('Audio 3/5'))).toBeGreaterThan(i + 1);
+  expect(buildSteps(six).find((t) => t.title.startsWith('Audio 3/5'))!.details.join(' ')).toContain('1 kHz');
+  expect(b.totalUsd).toBeGreaterThan(bom(allocatePins(EXAMPLES['mixer-3ch']!)).totalUsd);
 });

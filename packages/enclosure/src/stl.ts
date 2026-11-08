@@ -1,7 +1,7 @@
 import type * as THREE from 'three';
-import { cutoutsOf, ensureLayout } from '@kontrolla/core';
+import { IO_MODULES, PARTS, cutoutsOf, ensureLayout } from '@kontrolla/core';
 import type { DeviceSpec } from '@kontrolla/core';
-import { bottomGeometry, planDepth, rearPlateGeometry, topPanelGeometry, wallsGeometry } from './geometry';
+import { bottomGeometry, modulePlateGeometry, planDepth, rearPlateGeometry, topPanelGeometry, wallsGeometry } from './geometry';
 
 /** Binary STL of the printable parts (top panel with holes, walls, rear plate with holes, bottom plate), each flat on the bed,
  *  side by side along x with a 10 mm gap, ready to be split in the slicer. The top panel is printed face-up; with a wedge the
@@ -19,6 +19,17 @@ export function exportStl(input: DeviceSpec): Uint8Array {
     rearPlateGeometry(panel, cutoutsOf(spec, 'rear')),
     bottomGeometry(panel),
   ];
+  return toStl(parts, panel.width + 10);
+}
+
+/** Binary STL of one module faceplate (32 x 80 x 2 mm) with its connector holes; an unknown id or undefined gives a blank plate. */
+export function exportModulePlateStl(moduleId?: string): Uint8Array {
+  const m = moduleId ? IO_MODULES[moduleId] : undefined;
+  const footprints = Object.fromEntries(Object.entries(PARTS).map(([id, p]) => [id, p.footprint]));
+  return toStl([modulePlateGeometry(m?.mount === 'slot' ? m.connectors : [], footprints)], 0);
+}
+
+function toStl(parts: THREE.BufferGeometry[], pitch: number): Uint8Array {
   const tris = parts.map((g) => g.getAttribute('position').count / 3);
   const total = tris.reduce((a, b) => a + b, 0);
   const buf = new ArrayBuffer(84 + 50 * total);
@@ -27,7 +38,7 @@ export function exportStl(input: DeviceSpec): Uint8Array {
   dv.setUint32(80, total, true);
   let o = 84;
   parts.forEach((g, gi) => {
-    const dx = gi * (panel.width + 10);
+    const dx = gi * pitch;
     const g2 = g.index ? g.toNonIndexed() : g;
     const pos = g2.getAttribute('position');
     for (let t = 0; t < pos.count; t += 3) {

@@ -11,3 +11,5 @@ export * from './examples';
 export * from './uf2';
 export * from './groups';
 export * from './layout';
+export * from './audio';
+export * from './audio';

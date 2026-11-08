@@ -104,3 +104,28 @@ export function bottomGeometry(panel: Panel): THREE.ExtrudeGeometry {
   roundedRect(s, 0, 0, panel.width, planDepth(panel), panel.cornerRadius);
   return extrude(s, panel.thickness);
 }
+
+/** Plate size of one rear I/O slot: the opening plus a screw ear above and below (mm). Mirrors the 'io-slot' catalog part. */
+export const SLOT_PLATE = { w: 32, opening: 66, h: 80, screwDy: 36.5, screwD: 3.2 };
+
+/** Module faceplate: connector holes (and their flange screw holes) plus the two M3 ear holes. moduleId undefined = blank plate.
+ *  Shape coordinates: x right, y down, origin top-left of the 32 x 80 plate. */
+export function modulePlateGeometry(connectors: { part: string; dx: number; dy: number }[], parts: Record<string, { cutout: { shape: string; d?: number }; holes?: { dx: number; dy: number; d: number }[] } | undefined>): THREE.ExtrudeGeometry {
+  const { w, h, screwDy, screwD } = SLOT_PLATE;
+  const s = new THREE.Shape();
+  roundedRect(s, 0, 0, w, h, 2);
+  const hole = (x: number, y: number, d: number) => {
+    const p = new THREE.Path();
+    p.absarc(x, y, d / 2, 0, Math.PI * 2, false);
+    s.holes.push(p);
+  };
+  hole(w / 2, h / 2 - screwDy, screwD);
+  hole(w / 2, h / 2 + screwDy, screwD);
+  for (const c of connectors) {
+    const fp = parts[c.part];
+    if (!fp) continue;
+    if (fp.cutout.shape === 'circle') hole(w / 2 + c.dx, h / 2 + c.dy, fp.cutout.d!);
+    for (const sh of fp.holes ?? []) hole(w / 2 + c.dx + sh.dx, h / 2 + c.dy + sh.dy, sh.d);
+  }
+  return extrude(s, 2);
+}

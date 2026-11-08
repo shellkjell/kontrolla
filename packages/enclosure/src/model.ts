@@ -1,8 +1,8 @@
 // Live 3D model. World: x = panel x, z = panel y (towards the player), y up; the panel's top surface is at y = height.
 import * as THREE from 'three';
-import { GROUP_PAD, MCUS, PARTS, cutoutsOf, ensureLayout, groupBBox } from '@kontrolla/core';
+import { GROUP_PAD, IO_MODULES, MCUS, PARTS, cutoutsOf, ensureLayout, groupBBox, moduleOfSlot } from '@kontrolla/core';
 import type { DeviceSpec } from '@kontrolla/core';
-import { bottomGeometry, planDepth, rearPlateGeometry, slopeAngle, topPanelGeometry, wallsGeometry } from './geometry';
+import { SLOT_PLATE, bottomGeometry, planDepth, rearPlateGeometry, slopeAngle, topPanelGeometry, wallsGeometry } from './geometry';
 
 export interface EnclosureOptions {
   /** 0..1: spreads the layers (bottom, board, walls, top, controls) apart vertically. */
@@ -101,6 +101,22 @@ export function buildEnclosure(input: DeviceSpec, opts: EnclosureOptions = {}): 
     walls.add(jack);
   }
 
+  // I/O slots and fixed master outputs: a module plate (or a blank plate) in every rear slot opening
+  for (const id of Object.keys(lay.placements)) {
+    if (lay.placements[id]?.face !== 'rear') continue;
+    const slot = buildSlotModule(spec, id);
+    if (slot) walls.add(slot);
+  }
+  const usbc = lay.placements['usb-c-power'];
+  if (usbc) {
+    const c = tag(new THREE.Group(), 'usb-c-power', 'usb-c-power');
+    c.position.set(usbc.x, usbc.y, 0);
+    const body = mesh(new THREE.BoxGeometry(9, 3.2, 7), std('#b8bcc2', { metalness: 0.8 }), 'usb-c-power', 'usb-c-power/body');
+    body.position.z = t + 3.5;
+    c.add(body);
+    walls.add(c);
+  }
+
   for (const g of spec.groups ?? []) {
     const bb = groupBBox(spec, g.id, GROUP_PAD);
     if (!bb) continue;
@@ -144,6 +160,18 @@ export function buildEnclosure(input: DeviceSpec, opts: EnclosureOptions = {}): 
     ctlSurface.add(grp);
   }
 
+  for (const id of ['phones-63', 'phones-35']) {
+    const p = lay.placements[id];
+    const fp = PARTS[id === 'phones-63' ? 'phones-jack-63' : 'phones-jack-35']?.footprint;
+    if (!p || !fp || fp.cap.shape !== 'circle') continue;
+    const jack = tag(new THREE.Group(), id, id);
+    jack.position.set(p.x, 0, p.y);
+    const nut = mesh(new THREE.CylinderGeometry(fp.cap.d / 2, fp.cap.d / 2, fp.heightAbove, 6), std('#b8bcc2', { metalness: 0.8 }), id, `${id}/nut`, fp.heightAbove / 2);
+    const hole = mesh(new THREE.CylinderGeometry(fp.cap.d / 5, fp.cap.d / 5, 0.3, 16), std('#050505'), id, `${id}/hole`, fp.heightAbove + 0.05);
+    jack.add(nut, hole);
+    ctlSurface.add(jack);
+  }
+
   for (const m of spec.meters ?? []) {
     const p = lay.placements[m.id];
     const fp = PARTS[m.part]?.footprint;
@@ -161,6 +189,92 @@ export function buildEnclosure(input: DeviceSpec, opts: EnclosureOptions = {}): 
     ctlSurface.add(grp);
   }
   return root;
+}
+
+const metal = () => std('#b8bcc2', { metalness: 0.85, roughness: 0.35 });
+const black = () => std('#111214');
+
+/** One connector, modelled outwards from the plate along -z (z = 0 is the plate). XLR, TRS, mini and RCA look different on purpose. */
+function connectorModel(part: string, label: string, ownerId: string, name: string): THREE.Group {
+  const g = tag(new THREE.Group(), ownerId, name);
+  const add = (geo: THREE.BufferGeometry, mat: THREE.Material, z: number, x = 0, y = 0, rotX = false) => {
+    const m = mesh(geo, mat, ownerId, `${name}/part`);
+    if (rotX) m.rotation.x = Math.PI / 2; // cylinders run along z
+    m.position.set(x, y, z);
+    g.add(m);
+    return m;
+  };
+  const cyl = (r: number, len: number) => new THREE.CylinderGeometry(r, r, len, 28);
+  const flange = () => add(new THREE.BoxGeometry(26, 31, 2), std('#1a1c20', { metalness: 0.5 }), -1);
+  if (part === 'conn-xlr-f' || part === 'conn-xlr-m') {
+    flange();
+    add(cyl(11.5, 12), black(), -6, 0, 0, true);
+    if (part === 'conn-xlr-f') {
+      add(cyl(9.5, 1), std('#2a2c30'), -11.6, 0, 0, true); // insert face with three socket holes
+      for (const [x, y] of [[-3.5, -2], [3.5, -2], [0, 4]] as const) add(cyl(1.4, 1.2), std('#000'), -12, x, y, true);
+    } else for (const [x, y] of [[-3.5, -2], [3.5, -2], [0, 4]] as const) add(cyl(1.2, 8), metal(), -10, x, y, true); // male: three pins
+  } else if (part === 'conn-trs-63-d') {
+    flange();
+    add(cyl(7, 9), metal(), -6.5, 0, 0, true);
+    add(cyl(3.2, 9.4), black(), -6.5, 0, 0, true);
+  } else if (part === 'conn-trs-63-panel') {
+    add(cyl(7, 4), metal(), -2, 0, 0, true);
+    add(cyl(3.2, 4.4), black(), -2, 0, 0, true);
+  } else if (part === 'conn-mini-mono' || part === 'conn-mini-stereo') {
+    add(cyl(4.5, 2.5), metal(), -1.25, 0, 0, true);
+    add(cyl(1.5, 2.8), black(), -1.25, 0, 0, true);
+  } else if (part === 'conn-rca') {
+    add(cyl(6, 8), metal(), -4, 0, 0, true);
+    add(cyl(3.2, 8.4), std(/R$/.test(label) ? '#cc2222' : '#eeeeee'), -4, 0, 0, true); // red right, white left
+    add(cyl(1.2, 9), std('#d8b04a', { metalness: 0.9 }), -4, 0, 0, true);
+  }
+  return g;
+}
+
+/** The plate and connectors of one rear slot (`id` = I/O slot id or "master:<module>"), or a blank plate when it holds no module.
+ *  The returned group is named `slot:<id>` so setModule() can swap just this one. */
+export function buildSlotModule(spec: DeviceSpec, id: string): THREE.Group | undefined {
+  const p = spec.layout?.placements[id];
+  const isSlot = (spec.ioSlots ?? []).some((s) => s.id === id) || id.startsWith('master:');
+  if (!p || p.face !== 'rear' || !isSlot) return undefined;
+  const mod = IO_MODULES[moduleOfSlot(spec, id) ?? ''];
+  const { w, opening, h } = SLOT_PLATE;
+  const g = tag(new THREE.Group(), id, `slot:${id}`);
+  g.position.set(p.x, p.y, 0);
+  const plate = std(mod ? '#3b4048' : '#2c3036');
+  const body = mesh(new THREE.BoxGeometry(w, opening, 2), plate, id, `slot:${id}/plate`);
+  body.position.z = 1;
+  g.add(body);
+  for (const sy of [-1, 1]) {
+    const ear = mesh(new THREE.BoxGeometry(w, (h - opening) / 2, 2), plate, id, `slot:${id}/ear`);
+    ear.position.set(0, (sy * (h + opening)) / 4, 3 + 1); // ears lie behind the wall, against its inner face
+    g.add(ear);
+    const screw = mesh(new THREE.CylinderGeometry(1.6, 1.6, 1, 12), metal(), id, `slot:${id}/screw`);
+    screw.rotation.x = Math.PI / 2;
+    screw.position.set(0, sy * SLOT_PLATE.screwDy, 4);
+    g.add(screw);
+  }
+  mod?.connectors.forEach((c, i) => {
+    const cm = connectorModel(c.part, c.label, id, `slot:${id}/c${i}`);
+    cm.position.set(c.dx, -c.dy, 0); // dy points down, world y up
+    g.add(cm);
+  });
+  return g;
+}
+
+/** Swap the module in one rear slot of an already built model (spec = the spec with the new module): only that plate is rebuilt. */
+export function setModule(root: THREE.Group, spec: DeviceSpec, slotId: string): void {
+  const old = root.getObjectByName(`slot:${slotId}`);
+  const parent = old?.parent ?? root.getObjectByName('walls');
+  if (!parent) return;
+  if (old) {
+    parent.remove(old);
+    old.traverse((o) => {
+      if (o instanceof THREE.Mesh) (o.geometry.dispose(), Array.isArray(o.material) ? o.material.forEach((m) => m.dispose()) : o.material.dispose());
+    });
+  }
+  const next = buildSlotModule(ensureLayout(spec), slotId);
+  if (next) parent.add(next);
 }
 
 /** Silkscreen layer (group labels and annotation text) as a transparent texture on the panel; only where a canvas exists (browser). */

@@ -1,4 +1,4 @@
-import { GROUP_PAD, cutoutsOf, ensureLayout, groupBBox } from '@kontrolla/core';
+import { GROUP_PAD, cutoutsOf, ensureLayout, groupBBox, moduleOfSlot } from '@kontrolla/core';
 import type { Cutout, DeviceSpec } from '@kontrolla/core';
 
 const f = (n: number) => String(Math.round(n * 100) / 100);
@@ -55,7 +55,16 @@ export function drillTemplateSvg(input: DeviceSpec): string {
     const top = D + REAR_GAP;
     o.push(`<text x="1" y="${f(top - 3)}" font-size="3" fill="#000">Rear wall, seen from outside (left-right mirrored vs the top view)</text>`);
     o.push(`<rect x="${f(r)}" y="${f(top)}" width="${f(W - 2 * r)}" height="${f(wallH)}" ${ink}/>`);
-    for (const c of rear) o.push(...hole(c, (x, y) => [W - x, top + (H - t - y)]));
+    const at = (x: number, y: number): [number, number] => [W - x, top + (H - t - y)];
+    for (const c of rear) {
+      const mod = c.id.includes('#') ? undefined : moduleOfSlot(spec, c.id); // slot openings say which module goes in
+      o.push(...hole(c, at).filter((l) => !(mod && l.startsWith('<text') && l.includes('font-size="1.8"')))); // the module label replaces the w x h size
+      if (mod) {
+        const [cx, cy] = at(c.x, c.y);
+        const name = (spec.ioSlots?.find((s) => s.id === c.id)?.label ?? 'Master') + ': ' + mod;
+        o.push(`<text x="${f(cx)}" y="${f(cy - c.h! / 2 + 3)}" font-size="2" text-anchor="middle" fill="#000">${esc(name.length > 26 ? name.slice(0, 25) + '…' : name)}</text>`);
+      }
+    }
   }
   o.push('</svg>');
   return o.join('\n');

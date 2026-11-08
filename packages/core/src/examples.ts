@@ -1,5 +1,7 @@
 // Example specs with groups and a computed panel layout. Pins are not allocated: run allocatePins() to fill them.
 import { allocateLeds } from './allocate';
+import { bindStripAudio } from './audio';
+import { DEFAULT_MASTER_OUTPUTS } from './catalog';
 import { createGroup, duplicateGroup } from './groups';
 import { autoLayout } from './layout';
 import type { AnalogControl, ButtonControl, Control, DeviceSpec, EncoderControl, Meter } from './types';
@@ -122,22 +124,43 @@ const masterControls = [
   analog('master-fader', 'Master', 'fader-60mm-b10k', 72, 'fader'),
 ];
 
-let mixer: DeviceSpec = {
-  version: 1, name: 'Portable Mixer 6', mcu: 'rp2040-pico', usbProductName: 'kont.rolla Mixer 6', muxes: [],
-  controls: [...ch1.controls, ...masterControls],
-  meters: [...ch1.meters, meter('master-meter-l', 'Master L', 78), meter('master-meter-r', 'Master R', 79)],
-  leds: { part: 'led-ws2812', count: 1, brightness: 9 },
-  midiPort: { part: 'midi-trs-a' },
+/** The mixer surface with n strips (built from strip 1 with duplicateGroup) and the master section. */
+const buildMixer = (n: number, name: string, product: string): DeviceSpec => {
+  let m: DeviceSpec = {
+    version: 1, name, mcu: 'rp2040-pico', usbProductName: product, muxes: [],
+    controls: [...ch1.controls, ...masterControls],
+    meters: [...ch1.meters, meter('master-meter-l', 'Master L', 78), meter('master-meter-r', 'Master R', 79)],
+    leds: { part: 'led-ws2812', count: 1, brightness: 9 },
+    midiPort: { part: 'midi-trs-a' },
+  };
+  m = createGroup(m, 'Ch 1', [...ch1.controls.map((c) => c.id), 'ch1-meter'], { id: 'ch1', kind: 'strip', color: STRIP_COLORS[0] });
+  m = createGroup(m, 'Master', [...masterControls.map((c) => c.id), 'master-meter-l', 'master-meter-r'], { id: 'master', kind: 'section', color: '#8899aa' });
+  if (n > 1) m = duplicateGroup(m, 'ch1', n - 1);
+  m.groups!.filter((g) => g.kind === 'strip').forEach((g, i) => (g.color = STRIP_COLORS[i]));
+  m = allocateLeds(m);
+  // all-white worst case stays inside the 400 mA LED budget: count * (1 + 60 mA * b / 255) <= 400
+  m.leds!.brightness = Math.min(32, Math.floor(((400 / m.leds!.count - 1) * 255) / 60));
+  return m;
 };
-mixer = createGroup(mixer, 'Ch 1', [...ch1.controls.map((c) => c.id), 'ch1-meter'], { id: 'ch1', kind: 'strip', color: STRIP_COLORS[0] });
-mixer = createGroup(mixer, 'Master', [...masterControls.map((c) => c.id), 'master-meter-l', 'master-meter-r'], { id: 'master', kind: 'section', color: '#8899aa' });
-mixer = duplicateGroup(mixer, 'ch1', 5);
-mixer.groups!.filter((g) => g.kind === 'strip').forEach((g, i) => (g.color = STRIP_COLORS[i]));
-mixer = allocateLeds(mixer);
+
+// Audio: the surface talks to the engine board over the TRS MIDI port. Channels 1-4 take either 6.3 mm or RCA (A/B button
+// selects), channel 5 is a mic input, channel 6 two mics. The 2-codec board is UNPROVEN (see catalog AUDIO_BOARDS).
+const mixer6 = bindStripAudio(buildMixer(6, 'Portable Mixer 6', 'kont.rolla Mixer 6'), {
+  board: 'teensy41-cs42448x2',
+  modules: ['io-trs-rca-combo', 'io-trs-rca-combo', 'io-trs-rca-combo', 'io-trs-rca-combo', 'io-xlr', 'io-dual-xlr'],
+  masterOutputs: [...DEFAULT_MASTER_OUTPUTS],
+});
+// The proven variant: one codec = 3 stereo channels (two line channels with A/B, one dual-XLR channel).
+const mixer3 = bindStripAudio(buildMixer(3, 'Portable Mixer 3 — proven', 'kont.rolla Mixer 3'), {
+  board: 'teensy41-cs42448',
+  modules: ['io-trs-rca-combo', 'io-trs-rca-combo', 'io-dual-xlr'],
+  masterOutputs: [...DEFAULT_MASTER_OUTPUTS],
+});
 
 export const EXAMPLES: Record<string, DeviceSpec> = {
   starter: finish(starter),
   'big-knobs': finish(bigKnobs),
   'teensy-mixer': finish(teensyMixer),
-  'mixer-6ch': finish(mixer),
+  'mixer-6ch': finish(mixer6),
+  'mixer-3ch': finish(mixer3),
 };

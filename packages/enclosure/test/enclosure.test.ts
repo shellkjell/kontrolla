@@ -1,6 +1,6 @@
 import { expect, test } from 'bun:test';
 import { EXAMPLES, allocatePins, cutoutsOf } from '@kontrolla/core';
-import { buildEnclosure, drillTemplateSvg, exportStl, setControlValue, setLeds } from '../src';
+import { buildEnclosure, buildSlotModule, drillTemplateSvg, exportModulePlateStl, exportStl, setControlValue, setLeds, setModule } from '../src';
 
 const spec = allocatePins(EXAMPLES['mixer-6ch']!);
 
@@ -79,8 +79,10 @@ test('wedge: top surface tilts by asin(drop / depth), rear plate and MIDI jack e
 });
 
 test('rear holes: USB opening and MIDI jack are on the rear section of the template', () => {
-  const rear = cutoutsOf(spec, 'rear').map((c) => c.id).sort();
-  expect(rear).toEqual(['midi-port', 'usb']);
+  const rear = cutoutsOf(spec, 'rear').map((c) => c.id).filter((id) => !id.includes('#')).sort();
+  expect(rear).toContain('midi-port');
+  expect(rear).toContain('usb');
+  expect(rear).toContain('usb-c-power');
   expect(cutoutsOf(spec).some((c) => c.face === 'rear')).toBe(false);
 });
 
@@ -90,4 +92,43 @@ test('flat enclosures (no wedge) still export', () => {
   const stl = exportStl(flat);
   const n = new DataView(stl.buffer, stl.byteOffset).getUint32(80, true);
   expect(stl.length).toBe(84 + 50 * n);
+});
+
+test('rear slots: a module plate with distinct connectors per slot, blank plate for an empty slot', () => {
+  const g = buildEnclosure(spec);
+  for (const s of spec.ioSlots!) expect(g.getObjectByName(`slot:${s.id}`), s.id).toBeDefined();
+  expect(g.getObjectByName('slot:master:out-xlr-pair')).toBeDefined();
+  expect(g.getObjectByName('slot:ch5-io/c0')).toBeDefined(); // XLR
+  expect(g.getObjectByName('slot:ch1-io/c3')).toBeDefined(); // RCA of the A/B combo
+  const blank = structuredClone(spec);
+  blank.ioSlots![0]!.module = 'blank';
+  expect(buildSlotModule(blank, 'ch1-io')!.getObjectByName('slot:ch1-io/c0')).toBeUndefined();
+});
+
+test('setModule swaps only that slot', () => {
+  const g = buildEnclosure(spec);
+  const other = g.getObjectByName('slot:ch2-io');
+  const before = g.getObjectByName('slot:ch1-io');
+  const next = structuredClone(spec);
+  next.ioSlots![0]!.module = 'io-dual-xlr';
+  setModule(g, next, 'ch1-io');
+  const after = g.getObjectByName('slot:ch1-io')!;
+  expect(after).not.toBe(before);
+  expect(g.getObjectByName('slot:ch2-io')).toBe(other);
+  expect(after.getObjectByName('slot:ch1-io/c1')).toBeDefined(); // two XLRs now
+  expect(after.getObjectByName('slot:ch1-io/c2')).toBeUndefined();
+});
+
+test('module plate STL is valid; drill template rear section labels every slot and master module', () => {
+  for (const m of ['io-dual-xlr', 'io-trs-rca-combo', undefined]) {
+    const stl = exportModulePlateStl(m);
+    const n = new DataView(stl.buffer, stl.byteOffset).getUint32(80, true);
+    expect(n).toBeGreaterThan(20);
+    expect(stl.length).toBe(84 + 50 * n);
+  }
+  const svg = drillTemplateSvg(spec);
+  for (const s of spec.ioSlots!) expect(svg).toContain(`${s.label}: ${s.module}`);
+  expect(svg).toContain('Master: out-xlr-pair');
+  // every slot opening is a 32 x 66 rect in the rear section
+  expect((svg.match(/width="32" height="66"/g) ?? []).length).toBe(spec.ioSlots!.length + 3);
 });
