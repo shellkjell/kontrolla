@@ -3,6 +3,6 @@
   "version": "0.1.0",
   "private": true,
   "type": "module",
-  "exports": { ".": "./src/index.ts" },
+  "exports": { ".": "./src/index.ts", "./worker": "./src/worker.ts" },
   "dependencies": { "rp2040js": "^1.4.1", "@kontrolla/core": "workspace:*" }
 }

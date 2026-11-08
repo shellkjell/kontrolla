@@ -1,7 +1,9 @@
 // DeviceSim backed by the real RP2040 firmware (rp2040js). Stimulus comes from core's shared physics layer.
 import { encodeConfig, Stimulus } from '@kontrolla/core';
 import type { DeviceSim, DeviceSpec, SimOptions } from '@kontrolla/core';
-import { Rp2040Rig } from './rig';
+import { Rp2040Rig, type UsbState } from './rig';
+
+export type Rp2040Device = DeviceSim & { readonly product: string; readonly usbState: UsbState };
 
 const BOOT_LIMIT_MS = 2000;
 
@@ -10,7 +12,7 @@ const BOOT_LIMIT_MS = 2000;
  * CONTRACTS §2); stimulus set before the first `advance` is therefore the baseline. Simulated time starts at 0 here.
  * `advance` runs synchronously in 1 ms slices; call it with small `ms` from a UI loop.
  */
-export async function createRp2040Device(spec: DeviceSpec, firmwareBin: Uint8Array, opts: SimOptions = {}): Promise<DeviceSim> {
+export async function createRp2040Device(spec: DeviceSpec, firmwareBin: Uint8Array, opts: SimOptions = {}): Promise<Rp2040Device> {
   const stim = new Stimulus(spec, opts);
   const rig = new Rp2040Rig(firmwareBin, encodeConfig(spec));
   const { rp } = rig;
@@ -35,6 +37,10 @@ export async function createRp2040Device(spec: DeviceSpec, firmwareBin: Uint8Arr
 
   return {
     fidelity: 'firmware',
+    product: rig.product,
+    get usbState() {
+      return rig.usbState;
+    },
     setAnalog: (id, v) => stim.setAnalog(id, v),
     setButton: (id, p) => stim.setButton(id, p, now),
     turnEncoder: (id, n) => stim.turnEncoder(id, n, now),
