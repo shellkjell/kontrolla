@@ -1,32 +1,23 @@
 import { MCUS } from './catalog';
-import type { AnalogControl, DeviceSpec } from './types';
+import type { AnalogControl, ButtonControl, DeviceSpec, Mux } from './types';
 
 const isAnalog = (c: { kind: string }): c is AnalogControl => c.kind === 'pot' || c.kind === 'fader';
 
-/** Fill missing pins. Deterministic; leaves pins unset if the MCU runs out. */
+/** Fill missing pins/mux slots. Deterministic; respects manual pins; leaves pins unset if the MCU runs out.
+ *  Muxes share ONE select bus (the first mux's S0..S3). Analog overflow -> analog muxes; if the buttons do not
+ *  all fit on direct pins they ALL go on digital muxes. Teensy has plenty of pins, so it stays direct. */
 export function allocatePins(input: DeviceSpec): DeviceSpec {
   const spec = structuredClone(input);
   const mcu = MCUS[spec.mcu];
   const used = new Set<number>();
   for (const m of spec.muxes) [m.sigPin, ...m.selectPins].forEach((p) => used.add(p));
+  if (spec.leds?.pin !== undefined) used.add(spec.leds.pin);
   for (const c of spec.controls) {
-    if (c.kind === 'encoder') (used.add(c.pinA), used.add(c.pinB));
-    else if (c.pin !== undefined) used.add(c.pin);
+    if (c.kind === 'encoder') {
+      if (c.pinA !== undefined) used.add(c.pinA);
+      if (c.pinB !== undefined) used.add(c.pinB);
+    } else if (c.pin !== undefined) used.add(c.pin);
   }
-
-  const freeAdc = mcu.adcPins.filter((p) => !used.has(p));
-  const need = spec.controls.filter((c): c is AnalogControl => isAnalog(c) && c.pin === undefined && !c.mux);
-  const slots: { id: string; ch: number }[] = [];
-  for (const m of spec.muxes)
-    for (let ch = 0; ch < 16; ch++)
-      if (!spec.controls.some((c) => isAnalog(c) && c.mux?.id === m.id && c.mux.channel === ch)) slots.push({ id: m.id, ch });
-
-  // Overflow beyond direct ADC pins goes to mux slots; each new mux costs one ADC pin.
-  let d = Math.min(need.length, freeAdc.length);
-  let newMuxes = 0;
-  while (need.length - d > slots.length + 16 * newMuxes && d > 0) (d--, newMuxes++);
-  const sigs = freeAdc.slice(d, d + newMuxes);
-  [...freeAdc.slice(0, d), ...sigs].forEach((p) => used.add(p));
 
   const digital = () =>
     mcu.usableGpio.filter((p) => !used.has(p)).sort((a, b) => Number(mcu.adcPins.includes(a)) - Number(mcu.adcPins.includes(b)) || a - b);
@@ -36,31 +27,123 @@ export function allocatePins(input: DeviceSpec): DeviceSpec {
     return p;
   };
 
-  for (const sigPin of sigs) {
+  // ---- analog ----
+  const freeAdc = mcu.adcPins.filter((p) => !used.has(p));
+  const need = spec.controls.filter((c): c is AnalogControl => isAnalog(c) && c.pin === undefined && !c.mux);
+  const aSlots: { id: string; ch: number }[] = [];
+  const dSlots: { id: string; ch: number }[] = [];
+  const occupied = new Set(spec.controls.flatMap((c) => (c.kind === 'encoder' || !c.mux ? [] : [`${c.mux.id}:${c.mux.channel}`])));
+  const addSlotsFor = (m: Mux) => {
+    for (let ch = 0; ch < 16; ch++) if (!occupied.has(`${m.id}:${ch}`)) (m.signal === 'digital' ? dSlots : aSlots).push({ id: m.id, ch });
+  };
+  spec.muxes.forEach(addSlotsFor);
+
+  // Overflow beyond direct ADC pins goes to mux slots; each new mux costs one ADC pin.
+  let d = Math.min(need.length, freeAdc.length);
+  let newMuxes = 0;
+  while (need.length - d > aSlots.length + 16 * newMuxes && d > 0) (d--, newMuxes++);
+  const sigs = freeAdc.slice(d, d + newMuxes);
+  [...freeAdc.slice(0, d), ...sigs].forEach((p) => used.add(p));
+
+  // ---- buttons: direct pins or digital muxes ----
+  const btns = spec.controls.filter((c): c is ButtonControl => c.kind === 'button' && c.pin === undefined && !c.mux);
+  const encPins = spec.controls.reduce((n, c) => n + (c.kind === 'encoder' ? Number(c.pinA === undefined) + Number(c.pinB === undefined) : 0), 0);
+  const busPins = spec.muxes.length > 0 ? 0 : 4;
+  const ledPin = spec.leds && spec.leds.pin === undefined ? 1 : 0;
+  const freeNow = digital().length - (sigs.length > 0 ? busPins : 0) - ledPin - encPins;
+  const dSigs = btns.length > freeNow ? Math.max(0, Math.ceil((btns.length - dSlots.length) / 16)) : 0;
+  const bus = (): [number, number, number, number] | undefined => {
+    const first = spec.muxes[0];
+    if (first) return first.selectPins;
     const sel = [take(), take(), take(), take()];
-    if (sel.some((s) => s === undefined)) break;
-    let n = spec.muxes.length + 1;
-    while (spec.muxes.some((m) => m.id === `mux${n}`)) n++;
-    const id = `mux${n}`;
-    spec.muxes.push({ id, part: 'mux-74hc4067', sigPin, selectPins: sel as [number, number, number, number] });
-    for (let ch = 0; ch < 16; ch++) slots.push({ id, ch });
+    return sel.some((s) => s === undefined) ? undefined : (sel as [number, number, number, number]);
+  };
+
+  const newMux = (sigPin: number, signal: Mux['signal'], sel: [number, number, number, number]) => {
+    let n = spec.muxes.filter((m) => m.signal === signal).length + 1;
+    const prefix = signal === 'digital' ? 'dmux' : 'mux';
+    while (spec.muxes.some((m) => m.id === `${prefix}${n}`)) n++;
+    const m: Mux = { id: `${prefix}${n}`, part: 'mux-74hc4067', sigPin, selectPins: sel, signal };
+    spec.muxes.push(m);
+    addSlotsFor(m);
+  };
+
+  const sel = sigs.length + dSigs > 0 ? bus() : undefined;
+  if (sel) {
+    for (const sigPin of sigs) newMux(sigPin, 'analog', sel);
+    for (let i = 0; i < dSigs; i++) {
+      const sigPin = take();
+      if (sigPin === undefined) break;
+      newMux(sigPin, 'digital', sel);
+    }
   }
 
   need.forEach((c, i) => {
     const direct = freeAdc[i];
     if (i < d && direct !== undefined) c.pin = direct;
     else {
-      const s = slots.shift();
+      const s = aSlots.shift();
       if (s) c.mux = { id: s.id, channel: s.ch };
     }
   });
 
+  if (spec.leds && spec.leds.pin === undefined) {
+    const p = take();
+    if (p !== undefined) spec.leds.pin = p;
+  }
+
   for (const c of spec.controls) {
-    if (c.kind === 'button' && c.pin === undefined) c.pin = take() as number;
-    else if (c.kind === 'encoder') {
-      if (c.pinA === undefined) c.pinA = take() as number;
-      if (c.pinB === undefined) c.pinB = take() as number;
+    if (c.kind === 'button' && c.pin === undefined && !c.mux) {
+      const s = btns.length > freeNow ? dSlots.shift() : undefined;
+      if (s) c.mux = { id: s.id, channel: s.ch };
+      else {
+        const p = take();
+        if (p !== undefined) c.pin = p;
+      }
+    } else if (c.kind === 'encoder') {
+      if (c.pinA === undefined) c.pinA = take();
+      if (c.pinB === undefined) c.pinB = take();
     }
   }
+  return allocateLeds(spec);
+}
+
+/** Give button LEDs and meters their place in the WS2812 chain. A missing index/start is < 0 (or the button has led set to -1).
+ *  Order = groups in order, members in order, then ungrouped buttons, then ungrouped meters, so the data line runs
+ *  group by group (strip by strip). Already-assigned ranges are kept; new ones take the first free gap. Creates/grows spec.leds. */
+export function allocateLeds(input: DeviceSpec): DeviceSpec {
+  const spec = structuredClone(input);
+  const meters = spec.meters ?? [];
+  const byId = new Map<string, { size: number; set: (start: number) => void; start: number }>();
+  for (const c of spec.controls)
+    if (c.kind === 'button' && c.led) {
+      const led = c.led;
+      byId.set(c.id, { size: 1, start: led.index, set: (s) => (led.index = s) });
+    }
+  for (const m of meters) byId.set(m.id, { size: m.ledCount, start: m.ledStart, set: (s) => (m.ledStart = s) });
+
+  const order: string[] = [];
+  const seen = new Set<string>();
+  const push = (id: string) => byId.has(id) && !seen.has(id) && (seen.add(id), order.push(id));
+  for (const g of spec.groups ?? []) g.members.forEach(push);
+  spec.controls.forEach((c) => push(c.id));
+  meters.forEach((m) => push(m.id));
+
+  const taken = new Set<number>();
+  for (const e of byId.values()) if (e.start >= 0) for (let i = 0; i < e.size; i++) taken.add(e.start + i);
+  for (const id of order) {
+    const e = byId.get(id)!;
+    if (e.start >= 0) continue;
+    let s = 0;
+    const fits = () => Array.from({ length: e.size }, (_, i) => s + i).every((i) => !taken.has(i));
+    while (!fits()) s++;
+    for (let i = 0; i < e.size; i++) taken.add(s + i);
+    e.set(s);
+  }
+
+  if (byId.size === 0) return spec;
+  const need = taken.size ? Math.max(...taken) + 1 : 0;
+  if (spec.leds) spec.leds.count = Math.max(spec.leds.count, need);
+  else spec.leds = { part: 'led-ws2812', count: need, brightness: 64 };
   return spec;
 }

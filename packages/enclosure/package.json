@@ -1,0 +1,8 @@
+{
+  "name": "@kontrolla/enclosure",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "exports": { ".": "./src/index.ts" },
+  "dependencies": { "three": "^0.170.0", "@kontrolla/core": "workspace:*" }
+}
