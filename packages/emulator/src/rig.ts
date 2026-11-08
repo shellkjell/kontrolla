@@ -8,7 +8,7 @@ export type UsbState = 'detached' | 'enumerating' | 'configured';
 export const BLOB_FLASH_OFFSET = 0x1f0000;
 const NS_PER_CYCLE = 8; // 125 MHz
 const EP0_MAX = 64;
-const enum Step { Idle, Address, Device, Config, String, SetConfig, Done }
+const enum Step { Idle, Address, Device, Config, String, Done }
 const CIN_LEN: Record<number, number> = { 0x8: 3, 0x9: 3, 0xa: 3, 0xb: 3, 0xc: 2, 0xd: 2, 0xe: 3 };
 
 const ctrl = (dir: DataDirection, bRequest: number, wValue: number, wIndex: number, wLength: number) =>
@@ -106,11 +106,12 @@ export class Rp2040Rig {
         return this.send(get(0x0300 | this.iProduct, 0x0409, 255), 255);
       case Step.String:
         this.product = utf16(this.data);
-        this.step = Step.SetConfig;
-        return this.send(ctrl(DataDirection.HostToDevice, 9, 1, 0, 0));
-      case Step.SetConfig:
+        // 'configured' is declared when SET_CONFIGURATION is *issued*, not when its status ZLP comes back: the firmware
+        // mounts (and may start its first scan) a few microseconds before the host sees that ZLP, so waiting for the ZLP
+        // would let the first scan latch its baseline before the caller could set any stimulus.
         this.step = Step.Done;
         this.usbState = 'configured';
+        return this.send(ctrl(DataDirection.HostToDevice, 9, 1, 0, 0));
     }
   }
 
@@ -123,7 +124,7 @@ export class Rp2040Rig {
     usb.onResetReceived = () => this.next();
     usb.onEndpointWrite = (ep, buf) => {
       if (ep === 0) {
-        if (this.step === Step.Address || this.step === Step.SetConfig) {
+        if (this.step === Step.Address || this.step === Step.Done) {
           if (buf.length === 0) this.next(); // status ZLP
           return;
         }

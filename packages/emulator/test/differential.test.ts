@@ -10,7 +10,7 @@ async function script(spec: DeviceSpec, d: DeviceSim): Promise<number[][]> {
   d.onMidi((m) => out.push(m));
   const pots = spec.controls.filter((c) => c.kind === 'pot' || c.kind === 'fader');
   pots.forEach((c, i) => d.setAnalog(c.id, 0.2 + (i % 5) * 0.15)); // before the first advance: both sims latch this baseline
-  const sweep = [0, 0.1, 0.3, 0.5, 0.52, 0.8, 1, 0.4, 0.4, 0];
+  const sweep = [0.1, 0.3, 0.5, 0.52, 0.8, 1, 0.4, 0.4, 0];
   for (const c of pots)
     for (const x of sweep) {
       d.setAnalog(c.id, x);
@@ -66,4 +66,17 @@ test('perf: simulated ms per wall ms', async () => {
   const rate = 2000 / (performance.now() - t);
   console.log(`big-knobs: ${rate.toFixed(2)} sim-ms per wall-ms`);
   expect(rate).toBeGreaterThan(0);
+});
+
+test('regression: power-on stimulus set before the first advance is the baseline (no ramp from 0)', async () => {
+  const spec = allocatePins(EXAMPLES.starter!);
+  const run = async (d: DeviceSim) => {
+    const out: number[][] = [];
+    d.onMidi((m) => out.push(m));
+    for (const c of spec.controls) if (c.kind === 'pot') d.setAnalog(c.id, 0.5);
+    await d.advance(20);
+    return out;
+  };
+  expect(await run(createModelDevice(spec))).toEqual([]);
+  expect(await run(await createRp2040Device(spec, firmware))).toEqual([]);
 });

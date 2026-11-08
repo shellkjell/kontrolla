@@ -63,6 +63,8 @@ export function createRp2040WorkerSim(
         product = m.product;
         ready = true;
         resolve(sim);
+        // Next macrotask: after the caller's synchronous setup, so stimulus set right after creation is the power-on state.
+        setTimeout(() => send({ type: 'run' }), 0);
       } else if (m.type === 'midi') m.events.forEach((ev) => midi.forEach((cb) => cb(ev.msg, ev.timeMs)));
       else if (m.type === 'stats') stats.forEach((cb) => cb(m));
       else fail(m.message);

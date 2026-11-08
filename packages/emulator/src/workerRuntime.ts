@@ -78,8 +78,7 @@ export function createWorkerRuntime(
       gen++;
       dev = await createRp2040Device(m.spec, new Uint8Array(m.firmwareBin), m.opts);
       dev.onMidi((msg, timeMs) => events.push({ msg, timeMs }));
-      post({ type: 'ready', product: dev.product, usbState: dev.usbState });
-      start();
+      post({ type: 'ready', product: dev.product, usbState: dev.usbState }); // client sends 'run' after power-on stimulus
     } else if (!dev) {
       throw new Error(`'${m.type}' before init`);
     } else if (m.type === 'setAnalog') dev.setAnalog(m.id, m.value);
