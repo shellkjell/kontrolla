@@ -1,6 +1,8 @@
-import { EXAMPLES, MCUS } from '@kontrolla/core';
+import { useMemo } from 'react';
+import { EXAMPLES, MCUS, allocatePins, bom } from '@kontrolla/core';
 import type { DeviceSpec, McuId } from '@kontrolla/core';
 import { Glyph } from '../components/Glyph';
+import { PanelSvg } from '../features/PanelSvg';
 import { blank, withMcu } from '../store';
 
 const BOARDS: Record<McuId, { tag: string; fidelity: 'firmware' | 'model'; line: string; blurb: string }> = {
@@ -22,6 +24,7 @@ const NOTES: Record<string, string> = {
   starter: 'Four knobs and four pads. The classic first controller.',
   'big-knobs': 'Twelve knobs and two encoders. Needs a multiplexer on a Pico; it’s added for you.',
   'teensy-mixer': 'Six faders, two encoders and four buttons. A small mixing surface.',
+  'mixer-6ch': 'Six channel strips with EQ, FX send, pan, fader, level meter and lit mute / solo / cue, plus a master section.',
 };
 
 const sum = (s: DeviceSpec) => {
@@ -35,13 +38,18 @@ interface Props {
   current: DeviceSpec | null;
   onPick: (spec: DeviceSpec) => void;
   onContinue: () => void;
+  onImport: () => void;
 }
 
-export function Start({ mcu, setMcu, current, onPick, onContinue }: Props) {
-  const templates: { id: string; spec: DeviceSpec }[] = [
-    { id: 'blank', spec: blank(mcu) },
-    ...Object.entries(EXAMPLES).map(([id, spec]) => ({ id, spec: withMcu(spec, mcu) })),
-  ];
+export function Start({ mcu, setMcu, current, onPick, onContinue, onImport }: Props) {
+  const templates = useMemo(
+    () =>
+      [{ id: 'blank', spec: blank(mcu) }, ...Object.entries(EXAMPLES).map(([id, spec]) => ({ id, spec: withMcu(spec, mcu) }))].map((t) => {
+        const b = bom(allocatePins(t.spec));
+        return { ...t, price: b.totalUsd, parts: b.items.reduce((n, i) => n + i.qty, 0) };
+      }),
+    [mcu],
+  );
   return (
     <div className="start">
       <section className="hero">
@@ -85,19 +93,31 @@ export function Start({ mcu, setMcu, current, onPick, onContinue }: Props) {
       <section aria-labelledby="h-tpl">
         <h2 id="h-tpl" className="sec"><span>2</span>Start from</h2>
         <div className="cards three">
-          {templates.map(({ id, spec }, i) => (
+          {templates.map(({ id, spec, price, parts }, i) => (
             <button key={id} className="card choice tpl" style={{ '--i': i + 2 } as React.CSSProperties} onClick={() => onPick(spec)}>
               <span className="strip" aria-hidden>
-                {spec.controls.slice(0, 14).map((c) => <Glyph key={c.id} kind={c.kind} />)}
-                {spec.controls.length > 14 && <small>+{spec.controls.length - 14}</small>}
-                {spec.controls.length === 0 && <small>empty plate</small>}
+                {spec.layout ? (
+                  <PanelSvg spec={spec} variant="thumb" />
+                ) : (
+                  <>
+                    {spec.controls.slice(0, 14).map((c) => <Glyph key={c.id} kind={c.kind} />)}
+                    {spec.controls.length === 0 && <small>empty plate</small>}
+                  </>
+                )}
               </span>
-              <span className="title">{id === 'blank' ? 'Blank' : spec.name}</span>
+              <span className="title">{id === 'blank' ? 'Blank' : spec.name}{id === 'mixer-6ch' && <i className="new">new</i>}</span>
               <span className="line">{id === 'blank' ? 'Start with nothing and add exactly what you want.' : NOTES[id] ?? sum(spec)}</span>
               {id !== 'blank' && <span className="blurb">{sum(spec)}</span>}
+              {id !== 'blank' && (
+                <span className="facts">
+                  <b>{parts}</b> parts · <b>≈ ${price.toFixed(0)}</b>
+                  {spec.layout && <> · {spec.layout.panel.width} × {spec.layout.panel.depth} mm</>}
+                </span>
+              )}
             </button>
           ))}
         </div>
+        <p className="help import-hint">Have a design file or a share link? <button className="link" onClick={onImport}>Open a .json file</button>, or drop it anywhere on this page.</p>
       </section>
     </div>
   );

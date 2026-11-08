@@ -1,4 +1,5 @@
 import { memo, useCallback, useEffect, useMemo, useRef, useState } from 'react';
+import { bom } from '@kontrolla/core';
 import type { DeviceSim, DeviceSpec, Issue, SimOptions } from '@kontrolla/core';
 import { counts } from '../components/Issues';
 import { Panel } from '../components/Panel';
@@ -8,6 +9,11 @@ import type { Decoded } from '../midi';
 import { labelOf } from '../pins';
 import { createSim, type AppSim } from '../sim/createSim';
 import { NumInput } from '../components/fields';
+import { AutoTest } from '../features/AutoTest';
+import { DawCard } from '../features/DawCard';
+import { Inspector } from '../features/Inspector';
+import { keyOf, parse } from '../features/bench';
+import type { Bench } from '../features/bench';
 
 interface Props {
   spec: DeviceSpec; // allocated
@@ -22,6 +28,8 @@ interface Entry extends Decoded {
   n: number;
   t: number;
   marker?: boolean;
+  /** Sent by the pretend DAW to the device. */
+  host?: boolean;
 }
 
 const MAX_LOG = 300;
@@ -42,6 +50,10 @@ export function Test({ spec, issues, patchControls, onBack, onNext }: Props) {
   const [error, setError] = useState('');
   const [log, setLog] = useState<Entry[]>([]);
   const [rate, setRate] = useState(0);
+  const [leds, setLeds] = useState<string[] | undefined>();
+  const [bench, setBench] = useState<Bench | null>(null);
+  const [sel, setSel] = useState<string | undefined>();
+  const [testing, setTesting] = useState(false);
   const out = useMidiOut();
   const sim = useRef<AppSim | null>(null);
   const valuesRef = useRef(values);
@@ -49,19 +61,35 @@ export function Test({ spec, issues, patchControls, onBack, onNext }: Props) {
   const sendRef = useRef(out.send);
   sendRef.current = out.send;
   const entriesRef = useRef<Entry[]>([]);
+  const counter = useRef(0);
+  const dirty = useRef(true);
   const specRef = useRef(spec);
   specRef.current = spec;
+  const moveRef = useRef<(id: string, v: number) => void>(() => {});
+  const wiring = useMemo(() => bom(spec).wiring, [spec]);
+
+  // Messages the pretend DAW sends show up in the monitor too, marked as coming from the DAW.
+  const hostLog = useCallback((msg: number[]) => {
+    entriesRef.current.unshift({ n: counter.current++, t: 0, host: true, ...decode(msg, specRef.current) });
+    entriesRef.current.length = Math.min(entriesRef.current.length, MAX_LOG);
+    dirty.current = true;
+  }, []);
 
   // Rebuild the simulator whenever the design or the imperfections change (debounced so slider drags stay cheap).
   useEffect(() => {
     let dead = false;
     let raf = 0;
     let unsub = () => {};
+    let unLeds = () => {};
     const entries = entriesRef.current;
-    let n = 0;
-    let dirty = true;
     const times: number[] = [];
-    const mark = (text: string) => (entries.unshift({ n: n++, t: 0, kind: 'other', text, hex: '', marker: true }), (dirty = true));
+    const subs = new Set<(msg: number[]) => void>();
+    const seen = new Map<string, number>();
+    let frame: Uint8Array | null = null;
+    let frameNew = false;
+    let ledKey = '';
+    const mark = (text: string) => (entries.unshift({ n: counter.current++, t: 0, kind: 'other', text, hex: '', marker: true }), (dirty.current = true));
+    const gain = 256 / Math.max(1, spec.leds?.brightness ?? 255); // undo the global brightness so the screen shows the intended colours
 
     const timer = setTimeout(async () => {
       const opts: SimOptions = { analogNoiseLsb: noise, buttonBounceMs: bounce, seed };
@@ -79,11 +107,24 @@ export function Test({ spec, issues, patchControls, onBack, onNext }: Props) {
       setFidelity(s.fidelity);
       for (const c of spec.controls) if (c.kind === 'pot' || c.kind === 'fader') s.setAnalog(c.id, valuesRef.current[c.id] ?? 0.5);
       unsub = s.onMidi((msg, t) => {
-        entries.unshift({ n: n++, t, ...decode(msg, specRef.current) });
+        entries.unshift({ n: counter.current++, t, ...decode(msg, specRef.current) });
         entries.length = Math.min(entries.length, MAX_LOG);
         times.push(performance.now());
-        dirty = true;
+        dirty.current = true;
+        const p = parse(msg);
+        if (p) seen.set(keyOf(p.type, p.ch, p.num), p.value);
+        subs.forEach((f) => f(msg));
         sendRef.current(msg);
+      });
+      unLeds = s.onLeds((rgb) => ((frame = rgb), (frameNew = true)));
+      setBench({
+        sim: s,
+        spec,
+        seen,
+        onDevice: (cb) => (subs.add(cb), () => void subs.delete(cb)),
+        frame: () => frame,
+        value: (id) => valuesRef.current[id] ?? 0.5,
+        setAnalog: (id, x) => moveRef.current(id, x),
       });
       mark('Simulator started');
 
@@ -104,7 +145,14 @@ export function Test({ spec, issues, patchControls, onBack, onNext }: Props) {
         }
         while (times.length && times[0]! < now - 1000) times.shift();
         setRate(times.length);
-        if (dirty) (setLog([...entries]), (dirty = false));
+        if (dirty.current) (setLog([...entries]), (dirty.current = false));
+        if (frameNew && frame) {
+          frameNew = false;
+          const css: string[] = [];
+          for (let i = 0; i + 2 < frame.length; i += 3) css.push(`rgb(${[0, 1, 2].map((k) => Math.min(255, Math.round(frame![i + k]! * gain))).join(',')})`);
+          const key = css.join(';');
+          if (key !== ledKey) (ledKey = key, setLeds(css));
+        }
       };
       raf = requestAnimationFrame(tick);
     }, 150);
@@ -114,6 +162,9 @@ export function Test({ spec, issues, patchControls, onBack, onNext }: Props) {
       clearTimeout(timer);
       cancelAnimationFrame(raf);
       unsub();
+      unLeds();
+      setBench(null);
+      setLeds(undefined);
       sim.current?.dispose();
       sim.current = null;
     };
@@ -123,6 +174,7 @@ export function Test({ spec, issues, patchControls, onBack, onNext }: Props) {
     setValues((p) => ({ ...p, [id]: v }));
     sim.current?.setAnalog(id, v);
   }, []);
+  moveRef.current = onAnalog;
   const onButton = useCallback((id: string, d: boolean) => sim.current?.setButton(id, d), []);
   const onEncoder = useCallback((id: string, n: number) => sim.current?.turnEncoder(id, n), []);
 
@@ -169,8 +221,11 @@ export function Test({ spec, issues, patchControls, onBack, onNext }: Props) {
         {errors > 0 && <p className="callout warn">This design still has {errors} {errors === 1 ? 'problem' : 'problems'}. The simulator will try its best, but the real device may not behave like this. <button className="link" onClick={onBack}>Back to Design</button></p>}
         {error && <p className="callout warn" role="alert">The simulator couldn’t start: {error}</p>}
 
-        <Panel spec={spec} values={values} onAnalog={onAnalog} onButton={onButton} onEncoder={onEncoder} />
+        <Panel spec={spec} values={values} leds={leds} onAnalog={onAnalog} onButton={onButton} onEncoder={onEncoder} onTouch={setSel} />
         <p className="tips">Drag knobs and faders up and down (hold Shift for fine control), click and hold pads, spin encoders with the scroll wheel or by dragging. With the keyboard: Tab to a control, then arrow keys.</p>
+
+        <DawCard bench={bench} spec={spec} log={hostLog} paused={testing} />
+        <AutoTest bench={bench} noise={noise} bounce={bounce} fidelity={fidelity} onRunning={setTesting} />
 
         <section className="card imperfect">
           <header>
@@ -204,6 +259,7 @@ export function Test({ spec, issues, patchControls, onBack, onNext }: Props) {
       </section>
 
       <aside className="monitor-col">
+        <Inspector spec={spec} id={sel} wiring={wiring} onEdit={onBack} />
         <Monitor log={log} rate={rate} onClear={() => ((entriesRef.current.length = 0), setLog([]))} />
         <SendTo out={out} />
       </aside>
@@ -243,8 +299,8 @@ const Monitor = memo(function Monitor({ log, rate, onClear }: { log: Entry[]; ra
           e.marker ? (
             <li key={e.n} className="marker">{e.text}</li>
           ) : (
-            <li key={e.n} className={e.kind}>
-              <time>{simTime(e.t)}</time>
+            <li key={e.n} className={`${e.kind}${e.host ? ' host' : ''}`}>
+              <time>{e.host ? 'DAW →' : simTime(e.t)}</time>
               <span className="text">{e.text}</span>
               <span className="who">{e.who ?? ''}</span>
               <code>{e.hex}</code>

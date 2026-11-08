@@ -22,7 +22,10 @@ export function decode(msg: number[], spec: DeviceSpec): Decoded {
     spec.controls.find((c) => c.midi.channel === ch && (c.midi.type === 'cc' ? kind === 'cc' && c.midi.cc === n : kind === 'note' && c.midi.note === n));
   const who = (kind: 'cc' | 'note', n: number) => {
     const c = find(kind, n);
-    return c ? (c.label ?? c.id) : undefined;
+    if (c) return c.label ?? c.id;
+    // incoming level CCs (DAW -> device) belong to a meter
+    const m = kind === 'cc' ? spec.meters?.find((x) => x.midi.channel === ch && x.midi.cc === n) : undefined;
+    return m ? `${m.label ?? m.id} meter` : undefined;
   };
   if (type === 0xb) return { kind: 'cc', text: `CC ${a} ch${ch} = ${b}`, hex, who: who('cc', a) };
   if (type === 0x9 && b > 0) return { kind: 'on', text: `Note On ${noteName(a)} ch${ch} vel ${b}`, hex, who: who('note', a) };

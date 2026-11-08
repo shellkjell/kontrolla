@@ -1,21 +1,25 @@
+import { useCallback, useEffect, useState } from 'react';
 import type { Control, DeviceSpec, McuId } from '@kontrolla/core';
 
 export type Step = 'start' | 'design' | 'test' | 'build';
 export interface Saved {
   spec: DeviceSpec | null;
   step: Step;
+  /** Identifies the design for things saved next to it (build checklist). New on every fresh design. */
+  id: string;
 }
 
 const KEY = 'kontrolla.design.v1';
+const newId = (): string => Math.random().toString(36).slice(2, 10);
 
 export function load(): Saved {
   try {
-    const s = JSON.parse(localStorage.getItem(KEY) ?? 'null') as Saved | null;
-    if (s?.spec?.version === 1 && Array.isArray(s.spec.controls) && Array.isArray(s.spec.muxes)) return s;
+    const s = JSON.parse(localStorage.getItem(KEY) ?? 'null') as Partial<Saved> | null;
+    if (s?.spec?.version === 1 && Array.isArray(s.spec.controls) && Array.isArray(s.spec.muxes)) return { spec: s.spec, step: s.step ?? 'design', id: s.id ?? newId() };
   } catch {
     // corrupt or unavailable storage: start fresh
   }
-  return { spec: null, step: 'start' };
+  return { spec: null, step: 'start', id: newId() };
 }
 
 export const save = (s: Saved): void => {
@@ -25,6 +29,69 @@ export const save = (s: Saved): void => {
     // private mode / quota: the design just won't survive a reload
   }
 };
+
+interface Snapshot {
+  spec: DeviceSpec;
+  id: string;
+}
+interface Hist {
+  saved: Saved;
+  past: Snapshot[];
+  future: Snapshot[];
+  at: number; // time of the last spec change
+}
+const LIMIT = 100;
+/** Edits closer together than this (a drag, typing) share one undo step. */
+const MERGE_MS = 600;
+const snap = (s: Saved): Snapshot[] => (s.spec ? [{ spec: s.spec, id: s.id }] : []);
+
+/**
+ * The design plus its undo history. `setSpec` is the single funnel for every change from any screen;
+ * `replace` swaps in a different design (preset, import, shared link) and is undoable too.
+ */
+export function useDesign() {
+  const [h, setH] = useState<Hist>(() => ({ saved: load(), past: [], future: [], at: 0 }));
+  useEffect(() => save(h.saved), [h.saved]);
+
+  const update = useCallback(
+    (fn: (spec: DeviceSpec) => DeviceSpec) =>
+      setH((p) => {
+        const cur = p.saved.spec;
+        if (!cur) return p;
+        const next = fn(cur);
+        if (next === cur) return p;
+        const now = Date.now();
+        const merge = p.past.length > 0 && now - p.at < MERGE_MS;
+        return { saved: { ...p.saved, spec: next }, past: merge ? p.past : [...p.past, ...snap(p.saved)].slice(-LIMIT), future: [], at: now };
+      }),
+    [],
+  );
+  const setSpec = useCallback((s: DeviceSpec) => update(() => s), [update]);
+  const patchControls = useCallback((fn: (c: Control) => Control) => update((s) => ({ ...s, controls: s.controls.map(fn) })), [update]);
+  const go = useCallback((step: Step) => setH((p) => ({ ...p, saved: { ...p.saved, step } })), []);
+  const replace = useCallback(
+    (spec: DeviceSpec, step: Step = 'design') =>
+      setH((p) => ({ saved: { spec, step, id: newId() }, past: [...p.past, ...snap(p.saved)].slice(-LIMIT), future: [], at: 0 })),
+    [],
+  );
+  const undo = useCallback(
+    () =>
+      setH((p) => {
+        const prev = p.past.at(-1);
+        return prev ? { saved: { ...p.saved, ...prev }, past: p.past.slice(0, -1), future: [...snap(p.saved), ...p.future], at: 0 } : p;
+      }),
+    [],
+  );
+  const redo = useCallback(
+    () =>
+      setH((p) => {
+        const [next, ...rest] = p.future;
+        return next ? { saved: { ...p.saved, ...next }, past: [...p.past, ...snap(p.saved)], future: rest, at: 0 } : p;
+      }),
+    [],
+  );
+  return { saved: h.saved, setSpec, patchControls, go, replace, undo, redo, canUndo: h.past.length > 0, canRedo: h.future.length > 0 };
+}
 
 export const blank = (mcu: McuId): DeviceSpec => ({
   version: 1, name: 'My Controller', mcu, usbProductName: 'kont.rolla My Controller', muxes: [], controls: [],
