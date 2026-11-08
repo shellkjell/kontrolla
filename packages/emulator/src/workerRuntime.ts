@@ -8,12 +8,14 @@ export type WorkerIn =
   | { type: 'setAnalog'; id: string; value: number }
   | { type: 'setButton'; id: string; pressed: boolean }
   | { type: 'turnEncoder'; id: string; detents: number }
+  | { type: 'sendMidi'; msg: number[] }
   | { type: 'run' }
   | { type: 'pause' };
 
 export type WorkerOut =
   | { type: 'ready'; product: string; usbState: UsbState }
   | { type: 'midi'; events: { msg: number[]; timeMs: number }[] }
+  | { type: 'leds'; rgb: Uint8Array; timeMs: number }
   | { type: 'stats'; simMsPerWallMs: number; lagMs: number }
   | { type: 'error'; message: string };
 
@@ -28,6 +30,7 @@ export function createWorkerRuntime(
 ) {
   let dev: Rp2040Device | undefined;
   let events: { msg: number[]; timeMs: number }[] = [];
+  let ledFrames: { rgb: Uint8Array; timeMs: number }[] = [];
   let running = false;
   let gen = 0;
   let chain: Promise<void> = Promise.resolve();
@@ -55,6 +58,10 @@ export function createWorkerRuntime(
           post({ type: 'midi', events });
           events = [];
         }
+        // Only the newest frame matters to a UI; older ones in the same chunk are dropped.
+        const f = ledFrames.at(-1);
+        if (f) post({ type: 'leds', rgb: f.rgb, timeMs: f.timeMs });
+        ledFrames = [];
       }
       const w = now();
       if (w - statWall >= STATS_EVERY_MS) {
@@ -78,12 +85,14 @@ export function createWorkerRuntime(
       gen++;
       dev = await createRp2040Device(m.spec, new Uint8Array(m.firmwareBin), m.opts);
       dev.onMidi((msg, timeMs) => events.push({ msg, timeMs }));
+      dev.onLeds((rgb, timeMs) => ledFrames.push({ rgb, timeMs }));
       post({ type: 'ready', product: dev.product, usbState: dev.usbState }); // client sends 'run' after power-on stimulus
     } else if (!dev) {
       throw new Error(`'${m.type}' before init`);
     } else if (m.type === 'setAnalog') dev.setAnalog(m.id, m.value);
     else if (m.type === 'setButton') dev.setButton(m.id, m.pressed);
     else if (m.type === 'turnEncoder') dev.turnEncoder(m.id, m.detents);
+    else if (m.type === 'sendMidi') dev.sendMidi(m.msg);
     else if (m.type === 'run') start();
     else if (m.type === 'pause') running = false;
   }

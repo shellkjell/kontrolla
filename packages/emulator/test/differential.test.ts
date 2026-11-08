@@ -54,7 +54,7 @@ test('mux pots, toggle button, CC button, relative + absolute encoders', () => {
   ];
   return same({
     version: 1, name: 'mix', mcu: 'rp2040-pico', usbProductName: 'mix', controls,
-    muxes: [{ id: 'mx', part: 'mux-74hc4067', sigPin: 26, selectPins: [2, 3, 4, 5] }],
+    muxes: [{ id: 'mx', part: 'mux-74hc4067', sigPin: 26, selectPins: [2, 3, 4, 5], signal: 'analog' }],
   });
 });
 

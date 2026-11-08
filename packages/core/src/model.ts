@@ -1,4 +1,5 @@
 // Behavioural model of CONTRACTS §2. 1 ms scan, controls in spec order, integer math as written.
+// Includes host MIDI in (button/meter feedback) and the WS2812 frame, CONTRACTS §2.1/2.2.
 import { Stimulus } from './physics';
 import type { Control, DeviceSim, DeviceSpec, SimOptions } from './types';
 
@@ -15,6 +16,7 @@ interface St {
   prev: number;
   q: number;
   value: number;
+  ledOn: boolean;
 }
 
 export function createModelDevice(spec: DeviceSpec, opts: SimOptions = {}): DeviceSim {
@@ -24,13 +26,23 @@ export function createModelDevice(spec: DeviceSpec, opts: SimOptions = {}): Devi
   const emit = (msg: number[]) => subs.forEach((cb) => cb(msg, now));
   const state: St[] = spec.controls.map((c) => ({
     first: true, acc: 0, lastS: 0, lastV: 0, stable: 1, counter: 0, on: false, prev: 3, q: 0,
-    value: c.kind === 'encoder' ? c.midi.min : 0,
+    value: c.kind === 'encoder' ? c.midi.min : 0, ledOn: false,
   }));
+  const meters = spec.meters ?? [];
+  const lit = meters.map(() => 0);
+  const ledCount = spec.leds?.count ?? 0;
+  let dirty = false;
+  let scanCount = 0;
+  const ledSubs = new Set<(rgb: Uint8Array, t: number) => void>();
 
   const cc = (c: { midi: { channel: number; cc?: number } }, v: number) => emit([0xb0 | (c.midi.channel - 1), c.midi.cc!, v]);
 
   function button(c: Extract<Control, { kind: 'button' }>, s: St) {
-    const raw = stim.pinLevel(c.pin, now);
+    let raw: 0 | 1;
+    if (c.mux) {
+      const m = spec.muxes.find((x) => x.id === c.mux!.id)!;
+      raw = stim.digitalMuxLevel(m.sigPin, c.mux.channel, now);
+    } else raw = stim.pinLevel(c.pin!, now);
     if (raw === s.stable) return void (s.counter = 0);
     s.counter++;
     if (c.debounceMs !== 0 && s.counter < c.debounceMs) return;
@@ -43,6 +55,8 @@ export function createModelDevice(spec: DeviceSpec, opts: SimOptions = {}): Devi
       s.on = !s.on;
       on = s.on;
     } else on = pressed;
+    s.ledOn = on;
+    dirty = true;
     const m = c.midi;
     const ch = m.channel - 1;
     if (m.type === 'note') emit(on ? [0x90 | ch, m.note, m.velocity] : [0x80 | ch, m.note, 0]);
@@ -68,7 +82,7 @@ export function createModelDevice(spec: DeviceSpec, opts: SimOptions = {}): Devi
   }
 
   function encoder(c: Extract<Control, { kind: 'encoder' }>, s: St) {
-    const cur = (stim.pinLevel(c.pinA, now) << 1) | stim.pinLevel(c.pinB, now);
+    const cur = (stim.pinLevel(c.pinA!, now) << 1) | stim.pinLevel(c.pinB!, now);
     s.q += TABLE[(s.prev << 2) | cur]!;
     s.prev = cur;
     let d = 0;
@@ -84,6 +98,33 @@ export function createModelDevice(spec: DeviceSpec, opts: SimOptions = {}): Devi
     }
   }
 
+  /** Scaled RGB for the whole chain (CONTRACTS §2.2). */
+  function frame(): Uint8Array {
+    const rgb = new Uint8Array(ledCount * 3);
+    const put = (i: number, r: number, g: number, b: number) => {
+      if (i < 0 || i >= ledCount) return;
+      rgb.set([r, g, b], i * 3);
+    };
+    spec.controls.forEach((c, i) => {
+      if (c.kind !== 'button' || !c.led) return;
+      const n = parseInt(c.led.color.slice(1), 16);
+      const ch = [n >> 16, (n >> 8) & 255, n & 255];
+      const sh = state[i]!.ledOn ? 0 : 4;
+      put(c.led.index, ch[0]! >> sh, ch[1]! >> sh, ch[2]! >> sh);
+    });
+    meters.forEach((m, mi) => {
+      for (let i = 0; i < m.ledCount; i++) {
+        if (i >= lit[mi]!) put(m.ledStart + i, 0, 0, 0);
+        else if (i * 10 < m.ledCount * 6) put(m.ledStart + i, 0, 255, 0);
+        else if (i * 20 < m.ledCount * 17) put(m.ledStart + i, 255, 160, 0);
+        else put(m.ledStart + i, 255, 0, 0);
+      }
+    });
+    const b = spec.leds?.brightness ?? 0;
+    for (let i = 0; i < rgb.length; i++) rgb[i] = (rgb[i]! * b) >> 8;
+    return rgb;
+  }
+
   function scan() {
     spec.controls.forEach((c, i) => {
       const s = state[i]!;
@@ -91,6 +132,39 @@ export function createModelDevice(spec: DeviceSpec, opts: SimOptions = {}): Devi
       else if (c.kind === 'encoder') encoder(c, s);
       else analog(c, s);
     });
+    if (ledCount > 0 && scanCount % 10 === 0 && (dirty || scanCount === 0)) {
+      dirty = false;
+      const f = frame();
+      ledSubs.forEach((cb) => cb(f, now));
+    }
+    scanCount++;
+  }
+
+  /** Host → device MIDI (CONTRACTS §2.1). */
+  function sendMidi(msg: number[]) {
+    const type = (msg[0] ?? 0) & 0xf0;
+    const ch = (msg[0] ?? 0) & 0x0f;
+    const d1 = (msg[1] ?? 0) & 0x7f;
+    const d2 = (msg[2] ?? 0) & 0x7f;
+    if (type !== 0x80 && type !== 0x90 && type !== 0xb0) return;
+    spec.controls.forEach((c, i) => {
+      if (c.kind !== 'button') return;
+      const m = c.midi;
+      let on: boolean;
+      if (m.type === 'note' && (type === 0x90 || type === 0x80) && m.channel - 1 === ch && m.note === d1) on = type === 0x90 && d2 > 0;
+      else if (m.type === 'cc' && type === 0xb0 && m.channel - 1 === ch && m.cc === d1) on = d2 >= 64;
+      else return;
+      const s = state[i]!;
+      s.ledOn = on;
+      if (c.mode === 'toggle') s.on = on;
+      dirty = true;
+    });
+    if (type === 0xb0)
+      meters.forEach((m, mi) => {
+        if (m.midi.channel - 1 !== ch || m.midi.cc !== d1) return;
+        lit[mi] = Math.floor((d2 * m.ledCount + 126) / 127);
+        dirty = true;
+      });
   }
 
   return {
@@ -107,6 +181,11 @@ export function createModelDevice(spec: DeviceSpec, opts: SimOptions = {}): Devi
     onMidi(cb) {
       subs.add(cb);
       return () => void subs.delete(cb);
+    },
+    sendMidi,
+    onLeds(cb) {
+      ledSubs.add(cb);
+      return () => void ledSubs.delete(cb);
     },
   };
 }

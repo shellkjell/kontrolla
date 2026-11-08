@@ -86,7 +86,7 @@ test('encoder relative 65/63', async () => {
 });
 
 test('mux pot', async () => {
-  const mux: Mux = { id: 'm', part: 'mux-74hc4067', sigPin: 26, selectPins: [2, 3, 4, 5] };
+  const mux: Mux = { id: 'm', part: 'mux-74hc4067', sigPin: 26, selectPins: [2, 3, 4, 5], signal: 'analog' };
   const a = pot('a', { pin: undefined, mux: { id: 'm', channel: 3 } });
   const b = pot('b', { pin: undefined, mux: { id: 'm', channel: 7 }, midi: { type: 'cc', channel: 1, cc: 9, min: 0, max: 127 } });
   const d = createModelDevice(mk([a, b], [mux]));

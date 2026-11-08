@@ -8,6 +8,7 @@
  *
  * Readers (all in simulated ms):
  *   s.pinLevel(gpio, tMs)        -> 0 | 1   digital level (pull-ups: idle = 1, pressed button = 0)
+ *   s.digitalMuxLevel(sig, ch, tMs) -> 0 | 1 level on a digital mux SIG pin for select value ch (buttons on a digital mux)
  *   s.adcRaw(gpio, muxCh?)       -> 0..4095 one noisy ADC read. gpio = the analog MCU pin (direct control or mux SIG);
  *                                   muxCh = current select value 0-15 when gpio is a mux SIG. Unwired reads 0.
  *   s.analogRaw(controlId)       -> same read, by control id (used by the model).
@@ -42,7 +43,7 @@ export class Stimulus {
   private noiseRng: () => number;
   private bounceRng: () => number;
   private raw = new Map<string, number>();
-  private sched = new Map<number, Ev[]>();
+  private sched = new Map<string, Ev[]>();
   private encEnd = new Map<string, number>();
   private adcMap = new Map<string, string>(); // "gpio" or "gpio:ch" -> control id
   private ctl: Map<string, DeviceSpec['controls'][number]>;
@@ -63,11 +64,11 @@ export class Stimulus {
     }
   }
 
-  private push(gpio: number, ev: Ev) {
-    const l = this.sched.get(gpio) ?? [];
+  private push(key: string, ev: Ev) {
+    const l = this.sched.get(key) ?? [];
     l.push(ev);
     l.sort((a, b) => a.t - b.t); // stable
-    this.sched.set(gpio, l);
+    this.sched.set(key, l);
   }
 
   setAnalog(id: string, x: number): void {
@@ -79,12 +80,18 @@ export class Stimulus {
     if (c?.kind !== 'button') throw new Error(`not a button: ${id}`);
     const final: 0 | 1 = pressed ? 0 : 1;
     const bounce = this.opts.buttonBounceMs ?? 0;
-    if (bounce <= 0) return this.push(c.pin, { t: tMs, level: final });
+    let key: string;
+    if (c.mux) {
+      const m = this.spec.muxes.find((x) => x.id === c.mux!.id);
+      if (!m) throw new Error(`unknown mux for ${id}`);
+      key = `${m.sigPin}:${c.mux.channel}`;
+    } else key = `${c.pin}`;
+    if (bounce <= 0) return this.push(key, { t: tMs, level: final });
     // first edge at tMs, then 2 or 4 random flips inside the window; the last one lands on `final`
     const extra = 2 * (1 + Math.floor(this.bounceRng() * 2));
     const times = Array.from({ length: extra }, () => tMs + Math.floor(this.bounceRng() * bounce)).sort((a, b) => a - b);
-    this.push(c.pin, { t: tMs, level: final });
-    times.forEach((t, i) => this.push(c.pin, { t, level: i % 2 === 0 ? ((1 - final) as 0 | 1) : final }));
+    this.push(key, { t: tMs, level: final });
+    times.forEach((t, i) => this.push(key, { t, level: i % 2 === 0 ? ((1 - final) as 0 | 1) : final }));
   }
 
   turnEncoder(id: string, detents: number, tMs: number): void {
@@ -95,17 +102,26 @@ export class Stimulus {
     for (let d = 0; d < Math.abs(detents); d++)
       for (const st of seq) {
         t += ENCODER_STEP_MS;
-        this.push(c.pinA, { t, level: (st >> 1) as 0 | 1 });
-        this.push(c.pinB, { t, level: (st & 1) as 0 | 1 });
+        this.push(`${c.pinA}`, { t, level: (st >> 1) as 0 | 1 });
+        this.push(`${c.pinB}`, { t, level: (st & 1) as 0 | 1 });
       }
     this.encEnd.set(id, t);
   }
 
-  pinLevel(gpio: number, tMs: number): 0 | 1 {
-    const l = this.sched.get(gpio);
+  private level(key: string, tMs: number): 0 | 1 {
+    const l = this.sched.get(key);
     if (!l) return 1;
     for (let i = l.length - 1; i >= 0; i--) if (l[i]!.t <= tMs) return l[i]!.level;
     return 1;
+  }
+
+  pinLevel(gpio: number, tMs: number): 0 | 1 {
+    return this.level(`${gpio}`, tMs);
+  }
+
+  /** Level seen on a digital mux SIG pin (pull-up) while the select lines address `ch`. Idle = 1, pressed = 0. */
+  digitalMuxLevel(sigGpio: number, ch: number, tMs: number): 0 | 1 {
+    return this.level(`${sigGpio}:${ch}`, tMs);
   }
 
   analogRaw(id: string): number {

@@ -1,0 +1,26 @@
+; WS2812/SK6812, 800 kHz, GRB MSB-first. 10 PIO cycles per bit at 8 MHz:
+; "1" = 7 high + 3 low, "0" = 2 high + 8 low. Autopull at 24 bits; word is GRB << 8.
+.program ws2812
+.side_set 1
+.wrap_target
+bitloop:
+    out x, 1       side 0 [2]
+    jmp !x do_zero side 1 [1]
+    jmp bitloop    side 1 [4]
+do_zero:
+    nop            side 0 [4]
+.wrap
+
+% c-sdk {
+#include "hardware/clocks.h"
+static inline void ws2812_program_init(PIO pio, uint sm, uint offset, uint pin) {
+    pio_gpio_init(pio, pin);
+    pio_sm_set_consecutive_pindirs(pio, sm, pin, 1, true);
+    pio_sm_config c = ws2812_program_get_default_config(offset);
+    sm_config_set_sideset_pins(&c, pin);
+    sm_config_set_out_shift(&c, false, true, 24);
+    sm_config_set_clkdiv(&c, clock_get_hz(clk_sys) / (800000.0f * 10));
+    pio_sm_init(pio, sm, offset, &c);
+    pio_sm_set_enabled(pio, sm, true);
+}
+%}

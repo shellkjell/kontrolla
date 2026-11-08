@@ -27,12 +27,29 @@ export async function createRp2040Device(spec: DeviceSpec, firmwareBin: Uint8Arr
     baseRead(ch);
   };
 
-  const pins = spec.controls.flatMap((c) => (c.kind === 'button' ? [c.pin] : c.kind === 'encoder' ? [c.pinA, c.pinB] : []));
-  const apply = (tMs: number) => pins.forEach((p) => rp.gpio[p]!.setInputValue(!!stim.pinLevel(p, tMs)));
+  const pins = spec.controls.flatMap((c) => (c.kind === 'button' ? (c.pin !== undefined ? [c.pin] : []) : c.kind === 'encoder' ? [c.pinA!, c.pinB!] : []));
+  // Digital mux: the SIG pin shows the selected channel's button, so refresh it whenever S0..S3 change or time advances.
+  const digital = spec.muxes.filter((m) => m.signal === 'digital');
+  let curMs = 0;
+  const refreshMux = () =>
+    digital.forEach((m) => {
+      const ch = m.selectPins.reduce((a, p, i) => a | (rp.gpio[p]!.outputValue ? 1 << i : 0), 0);
+      rp.gpio[m.sigPin]!.setInputValue(!!stim.digitalMuxLevel(m.sigPin, ch, curMs));
+    });
+  if (digital.length) new Set(digital.flatMap((m) => m.selectPins)).forEach((p) => rp.gpio[p]!.addListener(refreshMux));
+  const apply = (tMs: number) => {
+    curMs = tMs;
+    pins.forEach((p) => rp.gpio[p]!.setInputValue(!!stim.pinLevel(p, tMs)));
+    refreshMux();
+  };
+  const ledSubs = new Set<(rgb: Uint8Array, t: number) => void>();
+  let t0 = 0;
+  if (spec.leds && spec.leds.count > 0 && spec.leds.pin !== undefined)
+    rig.watchWs2812(spec.leds.pin, spec.leds.count, (rgb, t) => ledSubs.forEach((cb) => cb(rgb, t - t0 / 1e6)));
 
   rig.runUntil(BOOT_LIMIT_MS * 1e6, () => rig.usbState === 'configured');
   if (rig.usbState !== 'configured') throw new Error(`firmware did not enumerate within ${BOOT_LIMIT_MS} ms`);
-  const t0 = rig.rp.clock.nanos;
+  t0 = rig.rp.clock.nanos;
   let now = 0; // integer ms since boot completed
 
   return {
@@ -52,5 +69,10 @@ export async function createRp2040Device(spec: DeviceSpec, firmwareBin: Uint8Arr
       }
     },
     onMidi: (cb) => rig.onMidi((m, t) => cb(m, t - t0 / 1e6)),
+    sendMidi: (msg) => rig.sendMidi(msg),
+    onLeds(cb) {
+      ledSubs.add(cb);
+      return () => void ledSubs.delete(cb);
+    },
   };
 }
