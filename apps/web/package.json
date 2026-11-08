@@ -21,6 +21,8 @@
     "@kontrolla/core": "workspace:*",
     "react": "^19.3.1",
     "react-dom": "^19.3.1",
-    "@kontrolla/emulator": "workspace:*"
+    "@kontrolla/emulator": "workspace:*",
+    "@kontrolla/enclosure": "workspace:*",
+    "three": "^0.170.0"
   }
 }

@@ -1,0 +1,29 @@
+/* Design page additions: view switch, grouped control list, split layout. */
+.viewbar { display: flex; align-items: center; gap: 8px; margin-bottom: 12px; }
+.viewbar .seg { background: var(--card); }
+.viewbar-sp { flex: 1; }
+.viewbar .btn.ghost { padding: 6px 10px; font-size: 13px; }
+
+.views { display: grid; gap: 14px; margin-bottom: 18px; min-width: 0; }
+.views.split { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+.dsg-inspector { display: flex; flex-direction: column; gap: 14px; min-width: 0; }
+
+/* split gives the stage two columns' worth of room; the check panel drops underneath */
+.design.wide { grid-template-columns: 250px minmax(0, 1fr); }
+.design.wide .check { grid-column: 1 / -1; position: static; max-height: none; display: grid; grid-template-columns: 1.4fr 1fr; align-items: start; }
+@media (max-width: 1100px) { .views.split { grid-template-columns: minmax(0, 1fr); } }
+
+/* grouped control list */
+.rows .gsec { margin-top: 6px; }
+.rows .gsec > .rows { margin: 2px 0 6px 8px; }
+.ghead { display: flex; align-items: center; gap: 6px; border-radius: 8px; background: var(--card); border: 1px solid var(--line); padding-right: 10px; }
+.gtoggle { flex: 1; min-width: 0; display: flex; align-items: center; gap: 10px; background: none; border: 0; padding: 8px 6px 8px 10px; text-align: left; }
+.gtoggle::after { content: '▸'; order: 5; color: var(--faint); font-size: 11px; transition: transform 0.15s; }
+.gtoggle[aria-expanded='true']::after { transform: rotate(90deg); }
+.gchip { flex: none; width: 12px; height: 12px; border-radius: 3px; background: var(--gc, var(--brass)); }
+.gname { flex: 1; min-width: 0; font-weight: 600; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.gcount { font: 11.5px var(--mono); color: var(--faint); }
+.row.grouped { box-shadow: inset 3px 0 0 var(--gc, transparent); }
+
+.glyph.gauge { width: 8px; height: 16px; margin: 0 3px; border-radius: 2px; background: linear-gradient(to top, var(--ok) 0 50%, var(--warn) 50% 75%, var(--err) 75%); }
+.glyph.lit { border-radius: 50%; background: var(--err); box-shadow: 0 0 8px 1px var(--err); }
