@@ -35,6 +35,7 @@ export function App() {
   const [mcu, setMcu] = useState<McuId>(saved.spec?.mcu ?? 'rp2040-pico');
   const [incoming, setIncoming] = useState<Incoming | null>(null);
   const [notice, setNotice] = useState<Notice | null>(null);
+  const [focus, setFocus] = useState<string>();
   const [palette, setPalette] = useState(false);
   const [help, setHelp] = useState(false);
   const [dropping, setDropping] = useState(false);
@@ -206,8 +207,8 @@ export function App() {
         {step === 'start' && (
           <Start mcu={mcu} setMcu={setMcu} current={spec} onContinue={() => go('design')} onPick={(s) => replace(s, 'design')} onImport={() => fileInput.current?.click()} />
         )}
-        {spec && allocated && step === 'design' && <Design spec={spec} allocated={allocated} issues={issues} setSpec={setSpec} onNext={() => go('test')} />}
-        {allocated && step === 'test' && <Test spec={allocated} issues={issues} patchControls={patchControls} onBack={() => go('design')} onNext={() => go('build')} />}
+        {spec && allocated && step === 'design' && <Design spec={spec} allocated={allocated} issues={issues} setSpec={setSpec} onNext={() => go('test')} focusId={focus} />}
+        {allocated && step === 'test' && <Test spec={allocated} issues={issues} patchControls={patchControls} onBack={() => go('design')} onEdit={(id) => (setFocus(id), go('design'))} onNext={() => go('build')} />}
         {allocated && step === 'build' && <Build spec={allocated} issues={issues} designId={saved.id} onBack={() => go('design')} onShare={share} onImport={() => fileInput.current?.click()} />}
       </div>
 

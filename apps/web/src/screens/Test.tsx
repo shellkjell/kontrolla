@@ -21,6 +21,7 @@ interface Props {
   /** Applies a tuning fix straight to the design (deadband / debounce). */
   patchControls: (fn: (c: DeviceSpec['controls'][number]) => DeviceSpec['controls'][number]) => void;
   onBack: () => void;
+  onEdit: (id?: string) => void;
   onNext: () => void;
 }
 
@@ -41,7 +42,7 @@ const FIDELITY = {
   model: { name: 'Model-level', line: 'Running a faithful model of the firmware’s logic. The generated code itself isn’t executed, so a typo in it wouldn’t show up here.' },
 } as const;
 
-export function Test({ spec, issues, patchControls, onBack, onNext }: Props) {
+export function Test({ spec, issues, patchControls, onBack, onEdit, onNext }: Props) {
   const [values, setValues] = useState<Record<string, number>>({});
   const [noise, setNoise] = useState(0);
   const [bounce, setBounce] = useState(0);
@@ -259,7 +260,7 @@ export function Test({ spec, issues, patchControls, onBack, onNext }: Props) {
       </section>
 
       <aside className="monitor-col">
-        <Inspector spec={spec} id={sel} wiring={wiring} onEdit={onBack} />
+        <Inspector spec={spec} id={sel} wiring={wiring} onEdit={() => onEdit(sel)} />
         <Monitor log={log} rate={rate} onClear={() => ((entriesRef.current.length = 0), setLog([]))} />
         <SendTo out={out} />
       </aside>

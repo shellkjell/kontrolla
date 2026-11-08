@@ -22,6 +22,7 @@ interface Props {
   issues: Issue[];
   setSpec: (s: DeviceSpec) => void;
   onNext: () => void;
+  focusId?: string; // preselect (e.g. from Test's inspector)
 }
 
 type View = '2d' | '3d' | 'split';
@@ -44,9 +45,9 @@ const loadView = (): View => {
 const mapText = (c: Control) => (c.midi.type === 'cc' ? `CC ${c.midi.cc}` : noteName(c.midi.note)) + ` · ch ${c.midi.channel}`;
 const numbers = (a: (number | undefined)[]) => a.filter((n): n is number => n !== undefined);
 
-export function Design({ spec, allocated, issues, setSpec, onNext }: Props) {
+export function Design({ spec, allocated, issues, setSpec, onNext, focusId }: Props) {
   const commit = setSpec; // App's setSpec is the one undoable funnel
-  const [sel, setSel] = useState<string[]>(() => (spec.controls[0] ? [spec.controls[0].id] : []));
+  const [sel, setSel] = useState<string[]>(() => (focusId ? [focusId] : spec.controls[0] ? [spec.controls[0].id] : []));
   const [view, setViewState] = useState<View>(loadView);
   const [open, setOpen] = useState<Record<string, boolean>>({});
   const [focus, setFocus] = useState<{ id: string; n: number; fit?: boolean }>();
