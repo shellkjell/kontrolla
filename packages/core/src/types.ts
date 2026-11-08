@@ -36,10 +36,13 @@ export interface ButtonControl {
   kind: 'button';
   part: string;
   label?: string;
-  pin: number;
+  pin?: number; // GPIO; omit when on a digital mux (allocatePins fills it)
+  mux?: { id: string; channel: number }; // on a mux with signal 'digital'
   midi: MidiTarget;
   mode: 'momentary' | 'toggle';
   debounceMs: number; // 0-255
+  /** Illuminated button: index into spec.leds chain. Shows the button's state; incoming MIDI on its target overrides it (DAW feedback). */
+  led?: { index: number; color: string }; // color '#rrggbb'
 }
 
 export interface EncoderControl {
@@ -47,8 +50,8 @@ export interface EncoderControl {
   kind: 'encoder';
   part: string;
   label?: string;
-  pinA: number;
-  pinB: number;
+  pinA?: number;
+  pinB?: number;
   midi: CcTarget;
   relative: boolean;
 }
@@ -58,8 +61,56 @@ export type Control = AnalogControl | ButtonControl | EncoderControl;
 export interface Mux {
   id: string;
   part: 'mux-74hc4067';
-  sigPin: number; // analog-capable MCU pin
-  selectPins: [number, number, number, number]; // S0..S3
+  sigPin: number; // analog: ADC-capable pin; digital: any GPIO (read with pull-up)
+  /** S0..S3. Muxes MAY share the same select pins (a shared select bus). */
+  selectPins: [number, number, number, number];
+  signal: 'analog' | 'digital'; // analog carries pots/faders, digital carries buttons
+}
+
+/** One WS2812/SK6812 chain (GRB, 800 kHz), powered from 5 V VBUS. */
+export interface LedChain {
+  part: 'led-ws2812';
+  pin?: number;
+  count: number; // 1-255
+  brightness: number; // 0-255 global scale
+}
+
+/** LED bar driven by incoming CC (DAW sends levels). Occupies leds [ledStart, ledStart+ledCount). */
+export interface Meter {
+  id: string;
+  part: string; // catalog part id (physical bar footprint)
+  label?: string;
+  ledStart: number;
+  ledCount: number; // 1-32
+  midi: { channel: number; cc: number }; // input: channel 1-16, cc 0-127
+}
+
+/** Belonging/togetherness: e.g. a channel strip. Members are control or meter ids; a member is in at most one group. */
+export interface Group {
+  id: string;
+  label: string;
+  color?: string; // '#rrggbb'
+  kind?: 'strip' | 'section';
+  members: string[];
+}
+
+/** Physical placement of a control/meter centre on the top panel, in mm. Origin top-left, +x right, +y towards the player. */
+export interface Placement {
+  x: number;
+  y: number;
+  rotation?: 0 | 90 | 180 | 270;
+}
+
+/** Free sketch / silkscreen marks on the panel (mm). */
+export type Annotation =
+  | { id: string; kind: 'text'; x: number; y: number; text: string; size?: number }
+  | { id: string; kind: 'stroke'; points: [number, number][] }
+  | { id: string; kind: 'rect'; x: number; y: number; w: number; h: number };
+
+export interface Layout {
+  panel: { width: number; depth: number; height: number; thickness: number; cornerRadius: number }; // mm; height = enclosure height
+  placements: Record<string, Placement>; // by control/meter id
+  annotations: Annotation[];
 }
 
 export interface DeviceSpec {
@@ -69,6 +120,10 @@ export interface DeviceSpec {
   usbProductName: string; // ASCII, max 31 chars
   muxes: Mux[];
   controls: Control[];
+  leds?: LedChain;
+  meters?: Meter[];
+  groups?: Group[];
+  layout?: Layout;
 }
 
 /** Physical-layer imperfections applied to stimulus. Same seeded model for every sim. */
@@ -86,4 +141,8 @@ export interface DeviceSim {
   turnEncoder(controlId: string, detents: number): void; // + = clockwise
   advance(ms: number): Promise<void>; // simulated time
   onMidi(cb: (msg: number[], timeMs: number) => void): () => void; // returns unsubscribe
+  /** Host → device MIDI (DAW feedback: meters, mute/solo state). */
+  sendMidi(msg: number[]): void;
+  /** Scaled RGB per LED (length = leds.count*3) whenever the chain is refreshed. */
+  onLeds(cb: (rgb: Uint8Array, timeMs: number) => void): () => void;
 }
