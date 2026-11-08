@@ -8,8 +8,8 @@ import { firmware } from './helpers';
 async function script(spec: DeviceSpec, d: DeviceSim): Promise<number[][]> {
   const out: number[][] = [];
   d.onMidi((m) => out.push(m));
-  await d.advance(5);
   const pots = spec.controls.filter((c) => c.kind === 'pot' || c.kind === 'fader');
+  pots.forEach((c, i) => d.setAnalog(c.id, 0.2 + (i % 5) * 0.15)); // before the first advance: both sims latch this baseline
   const sweep = [0, 0.1, 0.3, 0.5, 0.52, 0.8, 1, 0.4, 0.4, 0];
   for (const c of pots)
     for (const x of sweep) {

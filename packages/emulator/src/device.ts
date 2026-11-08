@@ -6,7 +6,8 @@ import { Rp2040Rig } from './rig';
 const BOOT_LIMIT_MS = 2000;
 
 /**
- * Boots the firmware and waits for USB enumeration; simulated time (timestamps, stimulus) starts at 0 afterwards.
+ * Boots the firmware and stops as soon as USB is configured, i.e. just before its first scan (which latches baselines,
+ * CONTRACTS §2); stimulus set before the first `advance` is therefore the baseline. Simulated time starts at 0 here.
  * `advance` runs synchronously in 1 ms slices; call it with small `ms` from a UI loop.
  */
 export async function createRp2040Device(spec: DeviceSpec, firmwareBin: Uint8Array, opts: SimOptions = {}): Promise<DeviceSim> {

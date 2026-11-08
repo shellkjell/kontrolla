@@ -145,11 +145,19 @@ int main(void) {
   if (cfg.valid) hw_init();
   tusb_init();
 
-  uint64_t next = time_us_64() + 1000;
+  // Scanning starts once USB is configured (CONTRACTS §2): the first scan latches baselines.
+  // Between scans sleep until the next 1 ms boundary; USB IRQs wake WFE so tud_task still runs promptly.
+  bool started = false;
+  uint64_t next = time_us_64();
   while (true) {
     tud_task();
+    if (cfg.valid && !started) {
+      if (!tud_mounted()) { best_effort_wfe_or_timeout(make_timeout_time_ms(1)); continue; }
+      started = true;
+      next = time_us_64();
+    }
     uint64_t now = time_us_64();
-    if (now < next) continue;
+    if (now < next) { best_effort_wfe_or_timeout(from_us_since_boot(next)); continue; }
     next += 1000;
     if (cfg.valid) scan();
     else gpio_put(LED_PIN, (now / 250000) & 1);  // blink ~2 Hz

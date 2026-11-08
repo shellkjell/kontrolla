@@ -61,7 +61,7 @@ Single USB-MIDI cable 0. No running status.
 
 ## 2. Semantics (firmware and model must match)
 
-There is one **scan every 1 ms**. Controls are processed in record order on
+There is one **scan every 1 ms**. Scanning starts once USB is configured; the first scan latches baselines and sends nothing. Controls are processed in record order on
 each scan, and every MIDI message is emitted immediately in that order.
 
 ### Analog (pot/fader)
