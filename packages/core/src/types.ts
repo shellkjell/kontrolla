@@ -65,6 +65,15 @@ export interface Mux {
   /** S0..S3. Muxes MAY share the same select pins (a shared select bus). */
   selectPins: [number, number, number, number];
   signal: 'analog' | 'digital'; // analog carries pots/faders, digital carries buttons
+  /** Active-low EN (74HC4067 pin 15). Lets several muxes share one sigPin: only the mux being read is enabled. */
+  enablePin?: number;
+}
+
+/** Hardware MIDI port (UART, 31250 baud). Mirrors every outgoing message; incoming messages get the same feedback semantics as USB. */
+export interface MidiPort {
+  part: string; // catalog: 'midi-trs-a' | 'midi-din5'
+  txPin?: number; // UART TX
+  rxPin?: number; // UART RX (optional: out-only port)
 }
 
 /** One WS2812/SK6812 chain (GRB, 800 kHz), powered from 5 V VBUS. */
@@ -121,6 +130,7 @@ export interface DeviceSpec {
   muxes: Mux[];
   controls: Control[];
   leds?: LedChain;
+  midiPort?: MidiPort;
   meters?: Meter[];
   groups?: Group[];
   layout?: Layout;
