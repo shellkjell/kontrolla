@@ -1,0 +1,7 @@
+node_modules/
+dist/
+!firmware/rp2040/dist/
+.toolchain/
+firmware/rp2040/build/
+*.log
+.DS_Store
