@@ -17,6 +17,8 @@ interface St {
   q: number;
   value: number;
   ledOn: boolean;
+  curS: number; // this scan's smoothed value and mapped CC value (for snapshots)
+  curV: number;
 }
 
 export function createModelDevice(spec: DeviceSpec, opts: SimOptions = {}): DeviceSim {
@@ -33,7 +35,7 @@ export function createModelDevice(spec: DeviceSpec, opts: SimOptions = {}): Devi
   };
   const state: St[] = spec.controls.map((c) => ({
     first: true, acc: 0, lastS: 0, lastV: 0, stable: 1, counter: 0, on: false, prev: 3, q: 0,
-    value: c.kind === 'encoder' ? c.midi.min : 0, ledOn: false,
+    value: c.kind === 'encoder' ? c.midi.min : 0, ledOn: false, curS: 0, curV: 0,
   }));
   const meters = spec.meters ?? [];
   const lit = meters.map(() => 0);
@@ -60,6 +62,10 @@ export function createModelDevice(spec: DeviceSpec, opts: SimOptions = {}): Devi
     } else on = pressed;
     s.ledOn = on;
     dirty = true;
+    edge(c, on);
+  }
+
+  function edge(c: Extract<Control, { kind: 'button' }>, on: boolean) {
     const m = c.midi;
     const ch = m.channel - 1;
     if (m.type === 'note') emit(on ? [0x90 | ch, m.note, m.velocity] : [0x80 | ch, m.note, 0]);
@@ -73,6 +79,8 @@ export function createModelDevice(spec: DeviceSpec, opts: SimOptions = {}): Devi
     const sv = s.acc >> 4;
     const { min, max } = c.midi;
     const v = min + Math.floor((sv * (max - min) + 2047) / 4095);
+    s.curS = sv;
+    s.curV = v;
     if (s.first) {
       s.first = false;
       s.lastS = sv;
@@ -138,6 +146,37 @@ export function createModelDevice(spec: DeviceSpec, opts: SimOptions = {}): Devi
     .sort((a, b) => busOf[a.mux]! - busOf[b.mux]! || a.ch - b.ch || a.mux - b.mux || a.i - b.i);
   const pre: number[] = spec.controls.map(() => 0);
 
+  // Snapshot request (CONTRACTS §2.5): served at the end of the next scan, in record order.
+  let snapReq = false;
+  function snapshot() {
+    spec.controls.forEach((c, i) => {
+      const s = state[i]!;
+      if (c.kind === 'pot' || c.kind === 'fader') {
+        cc(c, s.curV);
+        s.lastV = s.curV;
+        s.lastS = s.curS;
+      } else if (c.kind === 'button') {
+        if (c.mode === 'toggle') edge(c, s.on);
+        else if (s.stable === 0) edge(c, true); // momentary: only while held
+      } else if (c.kind === 'encoder' && !c.relative) cc(c, s.value);
+    });
+  }
+
+  // SysEx parser shared by USB and UART: only F0 7D 6B 01 F7 does anything; unknown SysEx is dropped silently.
+  let sxActive = false;
+  let sxBuf: number[] = [];
+  function sysexByte(b: number) {
+    if (b === 0xf0) {
+      sxActive = true;
+      sxBuf = [];
+    } else if (!sxActive) return;
+    else if (b === 0xf7) {
+      sxActive = false;
+      if (sxBuf.length === 3 && sxBuf[0] === 0x7d && sxBuf[1] === 0x6b && sxBuf[2] === 0x01) snapReq = true;
+    } else if (b & 0x80) sxActive = false;
+    else sxBuf.push(b);
+  }
+
   function scan() {
     for (const r of reads) {
       const c = r.c;
@@ -150,6 +189,10 @@ export function createModelDevice(spec: DeviceSpec, opts: SimOptions = {}): Devi
       else if (c.kind === 'encoder') encoder(c, s);
       else analog(c, s);
     });
+    if (snapReq) {
+      snapReq = false;
+      snapshot();
+    }
     if (ledCount > 0 && scanCount % 10 === 0 && (dirty || scanCount === 0)) {
       dirty = false;
       const f = frame();
@@ -160,6 +203,8 @@ export function createModelDevice(spec: DeviceSpec, opts: SimOptions = {}): Devi
 
   /** Host → device MIDI (CONTRACTS §2.1). */
   function sendMidi(msg: number[]) {
+    if ((msg[0] ?? 0) === 0xf0) return void msg.forEach(sysexByte); // SysEx (CONTRACTS §2.5)
+    sxActive = false; // a channel / system-common message abandons a SysEx in progress
     const type = (msg[0] ?? 0) & 0xf0;
     const ch = (msg[0] ?? 0) & 0x0f;
     const d1 = (msg[1] ?? 0) & 0x7f;
@@ -191,7 +236,14 @@ export function createModelDevice(spec: DeviceSpec, opts: SimOptions = {}): Devi
   function portRxByte(b: number) {
     b &= 0xff;
     if (b >= 0xf8) return;
+    if (b === 0xf0 || b === 0xf7 || (sxActive && !(b & 0x80))) {
+      rxStatus = 0;
+      rxData = [];
+      sysexByte(b);
+      return;
+    }
     if (b & 0x80) {
+      sxActive = false;
       rxData = [];
       rxStatus = b >= 0xf0 ? 0 : b;
       return;

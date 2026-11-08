@@ -159,6 +159,16 @@ export class Rp2040Rig {
 
   /** Host -> device MIDI (one channel-voice message), delivered as a USB-MIDI packet on cable 0 when the device reads its OUT endpoint. */
   sendMidi(msg: number[]) {
+    if (msg[0] === 0xf0) {
+      // SysEx: 3 bytes per packet, CIN 4 for "more follows", 5/6/7 for a final packet of 1/2/3 bytes
+      for (let i = 0; i < msg.length; i += 3) {
+        const chunk = msg.slice(i, i + 3);
+        const last = i + 3 >= msg.length;
+        this.outQueue.push(last ? 4 + chunk.length : 4, chunk[0] ?? 0, chunk[1] ?? 0, chunk[2] ?? 0);
+      }
+      this.pumpOut();
+      return;
+    }
     const st = msg[0] ?? 0;
     this.outQueue.push(st >> 4, st, msg[1] ?? 0, msg[2] ?? 0);
     this.pumpOut();

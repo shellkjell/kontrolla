@@ -20,7 +20,7 @@ typedef struct {
   // analog
   bool first;
   int16_t pre;  // mux controls: raw sampled by the bus-major pre-pass (analog 0..4095, button 1 = pressed)
-  int32_t acc, lastS, lastV;
+  int32_t acc, lastS, lastV, curS, curV;  // cur*: this scan's smoothed value and mapped CC value (for snapshots)
   // button
   bool stable, on, ledOn;
   uint8_t counter;
@@ -32,6 +32,7 @@ typedef struct {
 static State st[256];
 static uint8_t lit[256];  // per meter
 static bool dirty;
+static bool snap_req;  // snapshot request pending (CONTRACTS §2.5): served at the end of the next scan
 static uint32_t scanCount;
 static uint32_t ledbuf[255];
 static int led_dma = -1;
@@ -195,6 +196,8 @@ static void scan_analog(const CtrlRec *c, State *s) {
   }
   int32_t sm = s->acc >> 4;
   int32_t v = c->min + floor_div(sm * ((int32_t)c->max - c->min) + 2047, 4095);
+  s->curS = sm;
+  s->curV = v;
   if (s->first) {
     s->first = false;
     s->lastS = sm;
@@ -251,6 +254,24 @@ static void scan_encoder(const CtrlRec *c, State *s) {
   }
 }
 
+// Snapshot (CONTRACTS §2.5): current state of every control, in record order, as if it had just been sent.
+static void snapshot(void) {
+  for (int i = 0; i < cfg.controlCount; i++) {
+    const CtrlRec *c = &cfg.ctrl[i];
+    State *s = &st[i];
+    if (c->kind == 1) {
+      send_cc(c, s->curV);
+      s->lastV = s->curV;
+      s->lastS = s->curS;
+    } else if (c->kind == 2) {
+      if (c->flags & 1) send_onoff(c, s->on);
+      else if (s->stable) send_onoff(c, true);  // momentary: only while held
+    } else if (c->kind == 3 && !(c->flags & 2)) {
+      send_cc(c, s->value);
+    }
+  }
+}
+
 void scan(void) {
   mux_prepass();
   for (int i = 0; i < cfg.controlCount; i++) {
@@ -259,6 +280,7 @@ void scan(void) {
     else if (c->kind == 2) scan_button(c, &st[i]);
     else if (c->kind == 3) scan_encoder(c, &st[i]);
   }
+  if (snap_req) { snap_req = false; snapshot(); }
   if (cfg.led->count && scanCount % 10 == 0 && (dirty || scanCount == 0)) led_push();
   scanCount++;
 }
@@ -311,11 +333,42 @@ static void led_init(void) {
 
 static void midi_in(uint8_t status, uint8_t d1, uint8_t d2);
 
+// SysEx snapshot request F0 7D 6B 01 F7 (CONTRACTS §2.5), fed byte by byte from USB (CIN 4-7 packets) and from the UART.
+// Anything else is ignored without a reply; a status byte inside a SysEx abandons it.
+static bool sx_active;
+static uint8_t sx_len, sx_buf[4];
+static void sysex_byte(uint8_t b) {
+  if (b == 0xF0) { sx_active = true; sx_len = 0; return; }
+  if (!sx_active) return;
+  if (b == 0xF7) {
+    sx_active = false;
+    if (sx_len == 3 && sx_buf[0] == 0x7D && sx_buf[1] == 0x6B && sx_buf[2] == 0x01) snap_req = true;  // coalesces repeats
+  } else if (b & 0x80) {
+    sx_active = false;
+  } else {
+    if (sx_len < 4) sx_buf[sx_len] = b;
+    if (sx_len < 255) sx_len++;
+  }
+}
+
+// USB-MIDI event packet from the host: channel messages (CIN 8-E) or SysEx bytes (CIN 4-7); the rest is ignored.
+static void usb_packet(const uint8_t *p) {
+  uint8_t cin = p[0] & 0x0F;
+  if (cin >= 0x8 && cin <= 0xE) { sx_active = false; midi_in(p[1], p[2], p[3]); return; }
+  static const uint8_t sx_n[8] = {0, 0, 0, 0, 3, 1, 2, 3};  // bytes carried by CIN 4..7
+  if (cin >= 0x4 && cin <= 0x7) for (int i = 0; i < sx_n[cin]; i++) sysex_byte(p[1 + i]);
+  else if (cin == 0x2 || cin == 0x3) sx_active = false;
+}
+
 // UART RX: running status accepted, real-time bytes ignored, system messages clear running status.
 static uint8_t rx_status, rx_have, rx_need, rx_d[2];
 static void port_rx_byte(uint8_t b) {
   if (b >= 0xF8) return;
+  if (b == 0xF0 || b == 0xF7 || sx_active) {
+    if (b == 0xF0 || b == 0xF7 || !(b & 0x80)) { rx_status = 0; rx_have = 0; sysex_byte(b); return; }
+  }
   if (b & 0x80) {
+    sx_active = false;
     rx_have = 0;
     rx_status = b >= 0xF0 ? 0 : b;
     rx_need = ((b & 0xE0) == 0xC0) ? 1 : 2;
@@ -411,7 +464,7 @@ int main(void) {
   while (true) {
     tud_task();
     uint8_t pkt[4];
-    while (tud_midi_n_packet_read(0, pkt)) if (cfg.valid) midi_in(pkt[1], pkt[2], pkt[3]);
+    while (tud_midi_n_packet_read(0, pkt)) if (cfg.valid) usb_packet(pkt);
     if (port_uart) {  // polled: at least once per scan wake-up, FIFO holds 32 B = 10 ms of wire time
       while (uart_is_readable(port_uart)) port_rx_byte(uart_getc(port_uart));
       port_drain();

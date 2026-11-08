@@ -31,8 +31,8 @@ a mono module (`AudioChannel.stereo = false`) feeds L into both sides (dual-mono
 - **Boolean params** (`mute`, `solo`, `cue`, `inputSelect`): value ≥ 64 = on (inputSelect on = B).
 - Unbound params keep their defaults: channel gain 106 (0 dB), EQ/filter/pan centre 64, fader 100 (0 dB), fxSend 0, buttons off.
   Master: master 100 (0 dB), booth 127, phones 90, cueMix 64, fxReturn 100.
-- **Known gap:** the surface sends nothing at boot (first scan latches baselines), so engine and physical faders start out of sync
-  until each control is moved. Fix belongs on the surface (a send-all on boot / on request), not here.
+- **Boot sync:** the surface sends nothing at boot (first scan latches baselines), so the engine sends the snapshot request `F0 7D 6B 01 F7` (CONTRACTS §2.5)
+  on the port at boot and the surface answers with every analog value, toggle state and absolute encoder in one burst.
 
 ## 3. Signal path (per channel, per side)
 

@@ -179,4 +179,9 @@ test('teensy sketch: EN handling and Serial1 mirror/input', () => {
   expect(code).toContain('Serial1.write(status)');
   expect(code).toContain('portRxByte(Serial1.read())');
   expect(code).toContain('UNCOMPILED');
+  // snapshot request (CONTRACTS 2.5)
+  expect(code).toContain('static void snapshot()');
+  expect(code).toContain('usbMIDI.SystemExclusive');
+  expect(code).toContain('sxBuf[0] == 0x7D && sxBuf[1] == 0x6B && sxBuf[2] == 0x01');
+  expect(code).toContain('if (snapReq) { snapReq = false; snapshot(); }');
 });

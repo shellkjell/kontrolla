@@ -49,7 +49,7 @@ ${ledCount > 0 ? '#include <FastLED.h>\n' : ''}
 struct Ctl { uint8_t kind, pinA, pinB, mux, muxCh, type, ch, num, mn, mx, flags, debounce, deadband, smoothing, led, r, g, b; };
 struct Mux { uint8_t sig; uint8_t sel[4]; uint8_t digital; uint8_t en; };  // en = active-low EN pin, 255 = none
 struct Meter { uint8_t ch, cc, start, count; };
-struct St { bool first; int32_t acc, lastS, lastV; uint8_t stable, counter; bool on, ledOn; uint8_t prev; int8_t q; int16_t value; };
+struct St { bool first; int32_t acc, lastS, lastV, curS, curV; uint8_t stable, counter; bool on, ledOn; uint8_t prev; int8_t q; int16_t value; };
 
 static const uint8_t NCTL = ${n};
 static const uint8_t NMETER = ${nm};
@@ -67,6 +67,7 @@ ${meterRows.join('\n') || '  {0, 0, 0, 0}'}
 static St ST[${Math.max(n, 1)}];
 static uint8_t lit[${Math.max(nm, 1)}];
 static bool dirty = false;
+static bool snapReq = false;  // snapshot request (CONTRACTS 2.5), served at the end of the next scan
 static uint32_t scanCount = 0;
 ${ledCount > 0 ? `static CRGB leds[LED_COUNT];\n` : ''}static const int8_t TABLE[16] = {0, -1, 1, 0, 1, 0, 0, -1, -1, 0, 0, 1, 0, 1, -1, 0};
 static elapsedMicros tick;
@@ -117,6 +118,7 @@ static void scanAnalog(const Ctl &c, St &s) {
   else s.acc = s.acc + ((((raw << 4) - s.acc) * k) >> 8);
   int32_t sv = s.acc >> 4;
   int32_t v = c.mn + floorDiv(sv * ((int32_t)c.mx - (int32_t)c.mn) + 2047, 4095);
+  s.curS = sv; s.curV = v;
   if (s.first) {
     s.first = false; s.lastS = sv; s.lastV = v;
   } else if (v != s.lastV && abs(sv - s.lastS) >= c.deadband) {
@@ -164,6 +166,32 @@ static void scanEncoder(const Ctl &c, St &s) {
   if (nv < c.mn) nv = c.mn;
   if (nv > c.mx) nv = c.mx;
   if (nv != s.value) { s.value = nv; sendCC(c, (uint8_t)nv); }
+}
+
+// Snapshot (CONTRACTS 2.5): current state of every control in record order, as if it had just been sent.
+static void snapshot() {
+  for (uint8_t i = 0; i < NCTL; i++) {
+    const Ctl &c = CTL[i];
+    St &s = ST[i];
+    if (c.kind == 1) { sendCC(c, (uint8_t)s.curV); s.lastV = s.curV; s.lastS = s.curS; }
+    else if (c.kind == 2) {
+      if (c.flags & 1) sendEdge(c, s.on);
+      else if (s.stable == 0) sendEdge(c, true);  // momentary: only while held
+    } else if (c.kind == 3 && !(c.flags & 2)) sendCC(c, (uint8_t)s.value);
+  }
+}
+
+// SysEx F0 7D 6B 01 F7 requests a snapshot; any other SysEx is ignored without a reply.
+static bool sxActive = false;
+static uint8_t sxLen = 0, sxBuf[4];
+static void sysexByte(uint8_t b) {
+  if (b == 0xF0) { sxActive = true; sxLen = 0; return; }
+  if (!sxActive) return;
+  if (b == 0xF7) {
+    sxActive = false;
+    if (sxLen == 3 && sxBuf[0] == 0x7D && sxBuf[1] == 0x6B && sxBuf[2] == 0x01) snapReq = true;
+  } else if (b & 0x80) sxActive = false;
+  else { if (sxLen < 4) sxBuf[sxLen] = b; if (sxLen < 255) sxLen++; }
 }
 
 // Host -> device (CONTRACTS 2.1): button feedback and meter levels. Nothing is echoed.
@@ -237,7 +265,8 @@ ${
 static uint8_t rxStatus = 0, rxHave = 0, rxData[2];
 static void portRxByte(uint8_t b) {
   if (b >= 0xF8) return;
-  if (b & 0x80) { rxHave = 0; rxStatus = (b >= 0xF0) ? 0 : b; return; }
+  if (b == 0xF0 || b == 0xF7 || (sxActive && !(b & 0x80))) { rxStatus = 0; rxHave = 0; sysexByte(b); return; }
+  if (b & 0x80) { sxActive = false; rxHave = 0; rxStatus = (b >= 0xF0) ? 0 : b; return; }
   if (!rxStatus) return;
   rxData[rxHave++] = b;
   uint8_t need = ((rxStatus & 0xE0) == 0xC0) ? 1 : 2;
@@ -252,6 +281,8 @@ static void portRxByte(uint8_t b) {
 void loop() {
 ${spec.midiPort?.rxPin !== undefined ? '  while (Serial1.available()) portRxByte(Serial1.read());\n' : ''}  while (usbMIDI.read()) {
     uint8_t t = usbMIDI.getType();
+    if (t == usbMIDI.SystemExclusive) { const uint8_t *d = usbMIDI.getSysExArray(); for (uint16_t i = 0; i < usbMIDI.getSysExArrayLength(); i++) sysexByte(d[i]); }
+    else sxActive = false;
     if (t == usbMIDI.NoteOn) onFeedback(0x90, usbMIDI.getChannel() - 1, usbMIDI.getData1(), usbMIDI.getData2());
     else if (t == usbMIDI.NoteOff) onFeedback(0x80, usbMIDI.getChannel() - 1, usbMIDI.getData1(), usbMIDI.getData2());
     else if (t == usbMIDI.ControlChange) onFeedback(0xB0, usbMIDI.getChannel() - 1, usbMIDI.getData1(), usbMIDI.getData2());
@@ -269,6 +300,7 @@ ${spec.midiPort?.rxPin !== undefined ? '  while (Serial1.available()) portRxByte
       else if (CTL[i].kind == 2) scanButton(CTL[i], ST[i]);
       else scanEncoder(CTL[i], ST[i]);
     }
+    if (snapReq) { snapReq = false; snapshot(); }
     if (LED_COUNT && scanCount % 10 == 0 && (dirty || scanCount == 0)) { dirty = false; pushLeds(); }
     scanCount++;
   }

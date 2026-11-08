@@ -192,6 +192,23 @@ The preset estimates ~505 µs; the emulated firmware measures ~462 µs from the 
 The scan period is **not** changed: if the sum exceeds 1 ms the next scan simply starts late, so debounce counts and encoder sampling run slower than 1 ms; validation warns past 1000 µs.
 The firmware sleeps (timer alarm + WFI) during every settle and conversion rather than spinning.
 
+### 2.5 Snapshot request (boot sync)
+
+The surface sends nothing at boot (the first scan only latches baselines), so an audio engine or DAW can ask for the current state: the SysEx message
+**`F0 7D 6B 01 F7`** (`7D` = non-commercial manufacturer ID, `6B` = 'k', `01` = snapshot), received on USB or on the UART port.
+
+- **When:** the request sets a flag; at the **end of the next scan** (after that scan's normal processing, before the LED refresh) the surface emits, in **record order**:
+  every analog control's *current* mapped value `v` as a CC (even if unchanged, even inside its deadband); every **toggle** button's state as its ON or OFF message (per its target, §2 Button);
+  every **absolute** encoder's value as a CC. A **momentary** button sends its ON message only while it is currently pressed (debounced state), otherwise nothing; **relative** encoders send nothing.
+  Emitting a value also sets that analog control's `lastV/lastS`, so its next real move is measured from what the host was just told.
+- **Where:** like every message, on USB and mirrored on the UART TX in the same order (§2.3). No reply, no echo.
+- **Before the first scan:** the request waits; the first scan latches baselines (sends nothing), then the snapshot follows at its end.
+- **Repeats** received before that scan coalesce into one snapshot, so a snapshot is at most one message per control (≤ 255 × 3 B = 765 B), well inside the 4096-byte UART ring.
+  A snapshot of the Portable Mixer 6 preset is 83 messages (59 CC + 24 toggle states). Over USB the host must drain them, so on a real bus the scan that serves a large snapshot can take a few ms; nothing is dropped.
+- **Parsing:** the SysEx is matched byte-exact. Anything else (other IDs, other commands, a request with extra bytes, a request cut short by any status byte) is ignored without a reply.
+  USB carries it as CIN 4-7 packets; on the UART real-time bytes (`F8`-`FF`) inside it are skipped, any status byte other than `F7` abandons it, and `F0`/`F7` clear running status (§2.3).
+  A channel message arriving on USB also abandons a SysEx in progress.
+
 ## 3. Stimulus (shared physical layer, `packages/core/src/physics.ts`)
 
 - `setAnalog(id, x)`: `raw = round(clamp(x, 0, 1) * 4095)` (linear taper), plus seeded noise of ±`analogNoiseLsb` on each read, clamped to 0..4095.
