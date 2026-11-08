@@ -6,7 +6,7 @@ import { HELPER_URL, useMidiOut } from '../midiOut';
 import { decode, simTime } from '../midi';
 import type { Decoded } from '../midi';
 import { labelOf } from '../pins';
-import { createSim } from '../sim/createSim';
+import { createSim, type AppSim } from '../sim/createSim';
 import { NumInput } from '../components/fields';
 
 interface Props {
@@ -43,7 +43,7 @@ export function Test({ spec, issues, patchControls, onBack, onNext }: Props) {
   const [log, setLog] = useState<Entry[]>([]);
   const [rate, setRate] = useState(0);
   const out = useMidiOut();
-  const sim = useRef<DeviceSim | null>(null);
+  const sim = useRef<AppSim | null>(null);
   const valuesRef = useRef(values);
   valuesRef.current = values;
   const sendRef = useRef(out.send);
@@ -60,20 +60,19 @@ export function Test({ spec, issues, patchControls, onBack, onNext }: Props) {
     const entries = entriesRef.current;
     let n = 0;
     let dirty = true;
-    let clock = 0;
     const times: number[] = [];
     const mark = (text: string) => (entries.unshift({ n: n++, t: 0, kind: 'other', text, hex: '', marker: true }), (dirty = true));
 
     const timer = setTimeout(async () => {
       const opts: SimOptions = { analogNoiseLsb: noise, buttonBounceMs: bounce, seed };
-      let s: DeviceSim;
+      let s: AppSim;
       try {
         s = await createSim(spec, opts);
       } catch (e) {
         if (!dead) setError(e instanceof Error ? e.message : String(e));
         return;
       }
-      if (dead) return;
+      if (dead) return s.dispose();
       setError('');
       entries.length = 0;
       sim.current = s;
@@ -82,7 +81,7 @@ export function Test({ spec, issues, patchControls, onBack, onNext }: Props) {
       unsub = s.onMidi((msg, t) => {
         entries.unshift({ n: n++, t, ...decode(msg, specRef.current) });
         entries.length = Math.min(entries.length, MAX_LOG);
-        times.push(t);
+        times.push(performance.now());
         dirty = true;
         sendRef.current(msg);
       });
@@ -100,11 +99,10 @@ export function Test({ spec, issues, patchControls, onBack, onNext }: Props) {
           acc -= ms;
           busy = true;
           s.advance(ms).then(() => {
-            clock += ms;
             busy = false;
           });
         }
-        while (times.length && times[0]! < clock - 1000) times.shift();
+        while (times.length && times[0]! < now - 1000) times.shift();
         setRate(times.length);
         if (dirty) (setLog([...entries]), (dirty = false));
       };
@@ -116,6 +114,7 @@ export function Test({ spec, issues, patchControls, onBack, onNext }: Props) {
       clearTimeout(timer);
       cancelAnimationFrame(raf);
       unsub();
+      sim.current?.dispose();
       sim.current = null;
     };
   }, [spec, noise, bounce, seed]);
