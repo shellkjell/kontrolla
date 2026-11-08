@@ -24,12 +24,13 @@ export function drillTemplateSvg(input: DeviceSpec): string {
   for (const c of cutoutsOf(spec)) {
     const hw = (c.d ?? c.w!) / 2;
     const hh = (c.d ?? c.h!) / 2;
-    const arm = Math.max(hw, hh) + 3;
+    const ax = hw + 1; // crosshair sticks out 1 mm: short enough not to touch the next hole's crosshair
+    const ay = hh + 1;
     if (c.shape === 'circle') o.push(`<circle cx="${f(c.x)}" cy="${f(c.y)}" r="${f(hw)}" ${ink}/>`);
     else o.push(`<rect x="${f(c.x - hw)}" y="${f(c.y - hh)}" width="${f(2 * hw)}" height="${f(2 * hh)}" rx="${c.shape === 'slot' ? f(Math.min(hw, hh)) : 0}" ${ink}/>`);
-    o.push(`<path d="M${f(c.x - arm)} ${f(c.y)}H${f(c.x + arm)}M${f(c.x)} ${f(c.y - arm)}V${f(c.y + arm)}" ${ink}/>`);
-    const text = c.shape === 'circle' ? `Ø${f(c.d!)} mm` : `${f(c.w!)} x ${f(c.h!)} mm`;
-    o.push(`<text x="${f(c.x)}" y="${f(c.y + arm + 2.5)}" font-size="2.2" text-anchor="middle" fill="#000">${esc(text)}</text>`);
+    o.push(`<path d="M${f(c.x - ax)} ${f(c.y)}H${f(c.x + ax)}M${f(c.x)} ${f(c.y - ay)}V${f(c.y + ay)}" ${ink}/>`);
+    if (c.shape === 'circle') o.push(`<text x="${f(c.x + hw + 1)}" y="${f(c.y - 0.7)}" font-size="2" fill="#000">Ø${f(c.d!)}</text>`);
+    else o.push(`<text x="${f(c.x)}" y="${f(c.y + ay + 2.2)}" font-size="1.8" text-anchor="middle" fill="#000">${f(c.w!)}x${f(c.h!)}</text>`);
   }
   for (const a of lay.annotations) {
     if (a.kind === 'text') o.push(`<text x="${f(a.x)}" y="${f(a.y)}" font-size="${f(a.size ?? 4)}" fill="#000">${esc(a.text)}</text>`);
@@ -37,6 +38,6 @@ export function drillTemplateSvg(input: DeviceSpec): string {
     else o.push(`<polyline points="${a.points.map(([x, y]) => `${f(x)},${f(y)}`).join(' ')}" ${ink}/>`);
   }
   o.push(`<path d="M4 ${f(D - 4)}H24M4 ${f(D - 5.5)}V${f(D - 2.5)}M24 ${f(D - 5.5)}V${f(D - 2.5)}" ${ink}/>`);
-  o.push(`<text x="26" y="${f(D - 3)}" font-size="2.5" fill="#000">20 mm - print at 100 % (actual size)</text>`, '</svg>');
+  o.push(`<text x="26" y="${f(D - 3)}" font-size="2.5" fill="#000">20 mm - print at 100 % (actual size); all sizes in mm</text>`, '</svg>');
   return o.join('\n');
 }

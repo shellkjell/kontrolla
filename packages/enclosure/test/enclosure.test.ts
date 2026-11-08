@@ -35,3 +35,33 @@ test('buildEnclosure names objects by control id; live updates', () => {
   const mute = spec.controls.find((c) => c.id === 'ch1-mute')!;
   expect(mute.kind === 'button' && mute.led!.index).toBeDefined();
 });
+
+test('every path point and rect in the drill SVG stays inside the panel', () => {
+  for (const [name, ex] of Object.entries(EXAMPLES)) {
+    const s = allocatePins(ex);
+    const { width: W, depth: D } = s.layout!.panel;
+    const svg = drillTemplateSvg(s);
+    const ok = (x: number, y: number) => x >= 0 && y >= 0 && x <= W && y <= D;
+    for (const m of svg.matchAll(/<path d="([^"]+)"/g)) {
+      let x = 0;
+      let y = 0;
+      for (const [, cmd, nums] of m[1]!.matchAll(/([MHV])([-\d. ]+)/g)) {
+        const n = nums!.trim().split(/\s+/).map(Number);
+        if (cmd === 'M') [x, y] = [n[0]!, n[1]!];
+        else if (cmd === 'H') x = n[0]!;
+        else y = n[0]!;
+        expect(ok(x, y), `${name}: ${m[1]}`).toBe(true);
+      }
+    }
+    for (const m of svg.matchAll(/<rect x="([-\d.]+)" y="([-\d.]+)" width="([-\d.]+)" height="([-\d.]+)"/g)) {
+      const [x, y, w, h] = m.slice(1).map(Number) as [number, number, number, number];
+      expect(ok(x, y) && ok(x + w, y + h), `${name}: rect ${m[0]}`).toBe(true);
+    }
+  }
+});
+
+test('stereo master meters sit side by side', () => {
+  const p = spec.layout!.placements;
+  expect(p['master-meter-l']!.y).toBe(p['master-meter-r']!.y);
+  expect(p['master-meter-r']!.x).toBeGreaterThan(p['master-meter-l']!.x);
+});

@@ -144,29 +144,49 @@ interface Block {
   pos: Map<string, { x: number; y: number }>; // centres relative to block top-left
 }
 
-function stack(items: Geo[]): Block {
+const rowGap = (a: Geo[], b: Geo[]) => Math.max(...a.flatMap((x) => b.map((y) => clearance(x, y))));
+
+/** Rows stacked top to bottom, each row centred; items inside a row sit side by side. */
+function stack(rows: Geo[][]): Block {
   const pos = new Map<string, { x: number; y: number }>();
-  const w = Math.max(0, ...items.map((i) => i.w));
+  const rw = rows.map((r) => r.reduce((sum, it, k) => sum + it.w + (k ? clearance(r[k - 1]!, it) : 0), 0));
+  const w = Math.max(0, ...rw);
   let y = 0;
-  items.forEach((it, i) => {
-    pos.set(it.id, { x: w / 2, y: y + it.h / 2 });
-    y += it.h + (items[i + 1] ? clearance(it, items[i + 1]!) : 0);
+  rows.forEach((row, ri) => {
+    const rh = Math.max(...row.map((i) => i.h));
+    let x = (w - rw[ri]!) / 2;
+    row.forEach((it, k) => {
+      if (k) x += clearance(row[k - 1]!, it);
+      pos.set(it.id, { x: x + it.w / 2, y: y + rh / 2 });
+      x += it.w;
+    });
+    y += rh + (rows[ri + 1] ? rowGap(row, rows[ri + 1]!) : 0);
   });
-  return { items, w, h: y, pos };
+  return { items: rows.flat(), w, h: y, pos };
 }
+
+/** Consecutive meters (stereo pairs) share a row; everything else gets its own row. */
+const toRows = (items: Geo[]): Geo[][] =>
+  items.reduce<Geo[][]>((rows, it) => {
+    const last = rows[rows.length - 1];
+    if (last && it.kind === 'meter' && last[0]!.kind === 'meter') last.push(it);
+    else rows.push([it]);
+    return rows;
+  }, []);
 
 /** Sections: wrapped columns of at most maxH (when strips set the height), else rows of one kind, up to ROW_MAX each. */
 function flow(items: Geo[], maxH: number | undefined): Block {
   const pos = new Map<string, { x: number; y: number }>();
   if (maxH !== undefined) {
-    const cols: Geo[][] = [[]];
+    const cols: Geo[][][] = [[]];
     let y = 0;
-    for (const it of items) {
+    for (const row of toRows(items)) {
       const col = cols[cols.length - 1]!;
       const prev = col[col.length - 1];
-      const step = prev ? clearance(prev, it) : 0;
-      if (prev && y + step + it.h > maxH) (cols.push([it]), (y = it.h));
-      else (col.push(it), (y += step + it.h));
+      const rh = Math.max(...row.map((i) => i.h));
+      const step = prev ? rowGap(prev, row) : 0;
+      if (prev && y + step + rh > maxH) (cols.push([row]), (y = rh));
+      else (col.push(row), (y += step + rh));
     }
     let x = 0;
     let h = 0;
@@ -214,7 +234,7 @@ export function autoLayout(spec: DeviceSpec): Layout {
   const place = (b: Block, ox: number, oy: number) => b.pos.forEach((p, id) => (placements[id] = { x: ox + p.x, y: oy + p.y }));
   let width = 0;
   let depth = 0;
-  const sBlocks = strips.map((s) => stack(s.items));
+  const sBlocks = strips.map((s) => stack(s.items.map((i) => [i])));
   let x = 0;
   for (const b of sBlocks) {
     place(b, x, 0);
@@ -237,10 +257,10 @@ export function autoLayout(spec: DeviceSpec): Layout {
     let ry = 0;
     for (const b of rBlocks) {
       place(b, 0, ry);
-      ry += b.h + GUTTER;
+      ry += b.h + 2 * GUTTER - 4; // room for the next group's label
       width = Math.max(width, b.w);
     }
-    depth = Math.max(0, ry - GUTTER);
+    depth = Math.max(0, ry - (2 * GUTTER - 4));
   }
 
   for (const p of Object.values(placements)) ((p.x += MARGIN), (p.y += MARGIN));
