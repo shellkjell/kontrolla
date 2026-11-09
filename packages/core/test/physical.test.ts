@@ -297,3 +297,15 @@ test('bom: audio board, power board and modules with maturity flags; build steps
   expect(buildSteps(six).find((t) => t.title.startsWith('Audio 3/5'))!.details.join(' ')).toContain('1 kHz');
   expect(b.totalUsd).toBeGreaterThan(bom(allocatePins(EXAMPLES['mixer-3ch']!)).totalUsd);
 });
+
+test('mixer-6ch: the master section widens to the rear wall width, faders level, tap level with the strip buttons', () => {
+  const s = EXAMPLES['mixer-6ch']!;
+  const p = s.layout!.placements;
+  const rearRight = Math.max(...cutoutsOf(s, 'rear').map((c) => c.x + (c.d ?? c.w!) / 2));
+  const topRight = Math.max(...s.controls.map((c) => p[c.id]?.x ?? 0), ...s.meters!.map((m) => p[m.id]!.x));
+  expect(rearRight - topRight).toBeLessThan(40); // no big blank strip on the right any more
+  expect(p['master-fader']!.y).toBe(p['ch1-fader']!.y);
+  expect(p.tap!.y).toBe(p['ch1-input']!.y);
+  expect(s.layout!.panel.width).toBeLessThan(rearRight + 20);
+  for (const name of Object.keys(EXAMPLES)) expect(validateLayout(EXAMPLES[name]!), name).toEqual([]);
+});

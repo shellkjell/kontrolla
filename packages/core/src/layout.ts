@@ -13,6 +13,7 @@ const ROW_MAX = 6; // items per row in a section without strips
 export type GeoKind = 'pot' | 'fader' | 'button' | 'encoder' | 'meter' | 'port';
 const STRIP_MIN_W = 22; // a strip is never narrower than this (plus the gutter: ~30 mm pitch)
 const NUMBER_ROOM = 5; // extra top margin when strips carry a big channel number
+const MAX_COLUMN_GAP = 20; // widest gap autoLayout puts between the columns of a section
 const WEDGE_DEG = 5; // slope of the top panel on long enclosures
 
 /** Absolute panel hole. circle: d. slot/rect: w (x extent) x h (y extent) after rotation. slot has rounded ends. */
@@ -203,7 +204,7 @@ const toRows = (items: Geo[], buttonsPerRow = 1): Geo[][] =>
   }, []);
 
 /** Sections: wrapped columns of at most maxH (when strips set the height), else rows of one kind, up to ROW_MAX each. */
-function flow(items: Geo[], maxH: number | undefined): Block {
+function flow(items: Geo[], maxH: number | undefined, gap = GUTTER, bottomH?: number, buttonY?: number): Block {
   const pos = new Map<string, { x: number; y: number }>();
   if (maxH !== undefined) {
     const cols: Geo[][][] = [[]];
@@ -220,11 +221,17 @@ function flow(items: Geo[], maxH: number | undefined): Block {
     let h = 0;
     for (const col of cols) {
       const b = stack(col);
-      b.pos.forEach((p, id) => pos.set(id, { x: x + p.x, y: p.y }));
-      x += b.w + GUTTER;
-      h = Math.max(h, b.h);
+      // beside the strips, the column with the fader sits at the bottom, level with the channel faders
+      const dy = bottomH !== undefined && cols.length > 1 && col.some((r) => r.some((g) => g.kind === 'fader')) ? Math.max(0, bottomH - b.h) : 0;
+      // a button row lines up with the channel strips' button rows
+      const btn = buttonY !== undefined && cols.length > 1 ? b.items.find((g) => g.kind === 'button') : undefined;
+      const shift = btn ? Math.max(0, buttonY! - b.pos.get(btn.id)!.y) : 0;
+      const from = btn ? b.pos.get(btn.id)!.y - 1 : Infinity;
+      b.pos.forEach((p, id) => pos.set(id, { x: x + p.x, y: dy + p.y + (p.y >= from ? shift : 0) }));
+      x += b.w + gap;
+      h = Math.max(h, dy + b.h + shift);
     }
-    return { items, w: Math.max(0, x - GUTTER), h, pos };
+    return { items, w: Math.max(0, x - gap), h, pos };
   }
   const rows: Geo[][] = [];
   for (const it of items) {
@@ -295,6 +302,26 @@ function placeRear(spec: DeviceSpec, items: Geo[], old: Geo[], placements: Layou
  *  everything else forms sections to the right. Strips get a big number on the panel. Rear parts (USB, MIDI jack) go on the rear wall.
  *  Long panels slope down towards the player (wedge). */
 export function autoLayout(spec: DeviceSpec): Layout {
+  const first = layoutPass(spec, {});
+  const need = Math.ceil(first.rearRight + MARGIN);
+  if (!first.canWiden || first.contentWidth >= need - 2) return first.layout;
+  // The rear wall (I/O slots) is wider than the top content: let the sections beside the strips use that width. Fewer rows per
+  // column makes more columns; the gap between columns then soaks up what is left.
+  let best = first;
+  for (let h = Math.floor(first.stripHeight); h >= 80; h -= 8) {
+    const wide = layoutPass(spec, { restMaxH: h, gap: MAX_COLUMN_GAP });
+    best = wide;
+    if (wide.contentWidth < need) continue;
+    for (let gap = GUTTER; gap <= MAX_COLUMN_GAP; gap += 2) {
+      const t = layoutPass(spec, { restMaxH: h, gap });
+      if (t.contentWidth >= need - 2) return t.layout;
+    }
+    return wide.layout;
+  }
+  return best.layout;
+}
+
+function layoutPass(spec: DeviceSpec, opt: { restMaxH?: number; gap?: number }): { layout: Layout; rearRight: number; contentWidth: number; canWiden: boolean; stripHeight: number } {
   const all = new Map(geos({ ...spec, layout: undefined }).map((g) => [g.id, g]));
   const rear = [...all.values()].filter((g) => g.face === 'rear');
   for (const g of rear) all.delete(g.id);
@@ -327,7 +354,9 @@ export function autoLayout(spec: DeviceSpec): Layout {
   width = Math.max(0, x - GUTTER);
 
   const maxH = sBlocks.length ? depth : undefined;
-  const rBlocks = rest.map((items) => flow(items, maxH));
+  const firstButton = sBlocks[0]?.items.find((g) => g.kind === 'button');
+  const stripButtonY = firstButton ? sBlocks[0]!.pos.get(firstButton.id)!.y : undefined;
+  const rBlocks = rest.map((items) => flow(items, opt.restMaxH ?? maxH, opt.gap, opt.restMaxH !== undefined ? maxH : undefined, stripButtonY));
   if (maxH !== undefined) {
     let rx = width + (rBlocks.length ? GUTTER : 0);
     for (const b of rBlocks) {
@@ -381,9 +410,15 @@ export function autoLayout(spec: DeviceSpec): Layout {
     }
   }
   return {
-    panel: { width: Math.max(panelWidth, Math.ceil(rearPlaced.right + MARGIN)), depth: panelDepth, height, ...(frontHeight !== undefined && { frontHeight }), thickness, cornerRadius: 4 },
-    placements,
-    annotations,
+    layout: {
+      panel: { width: Math.max(panelWidth, Math.ceil(rearPlaced.right + MARGIN)), depth: panelDepth, height, ...(frontHeight !== undefined && { frontHeight }), thickness, cornerRadius: 4 },
+      placements,
+      annotations,
+    },
+    rearRight: rearPlaced.right,
+    contentWidth: panelWidth,
+    canWiden: maxH !== undefined && rBlocks.length > 0,
+    stripHeight: maxH ?? 0,
   };
 }
 
@@ -475,14 +510,15 @@ export function validateLayout(spec: DeviceSpec): Issue[] {
   }
 
   for (const grp of spec.groups ?? []) {
+    if (grp.kind === 'section') continue; // sections may span several columns on purpose
     const m = grp.members.flatMap((id) => placed.find((g) => g.id === id) ?? []);
     if (m.length < 2) continue;
-    // connected components: members within 25 mm of each other belong together
+    // connected components: members within 60 mm of each other belong together
     const comp = m.map((_, i) => i);
     const root = (i: number): number => (comp[i] === i ? i : (comp[i] = root(comp[i]!)));
     for (let i = 0; i < m.length; i++)
       for (let j = i + 1; j < m.length; j++)
-        if (gap(m[i]!, at(m[i]!).x, at(m[i]!).y, m[j]!, at(m[j]!).x, at(m[j]!).y) <= 25) comp[root(i)] = root(j);
+        if (gap(m[i]!, at(m[i]!).x, at(m[i]!).y, m[j]!, at(m[j]!).x, at(m[j]!).y) <= 60) comp[root(i)] = root(j);
     if (new Set(m.map((_, i) => root(i))).size > 1) add('info', `Group "${grp.label}" is spread over the panel; its members are not next to each other`, grp.members[0]);
   }
   return out;
