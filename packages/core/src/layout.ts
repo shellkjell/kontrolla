@@ -233,25 +233,48 @@ function flow(items: Geo[], maxH: number | undefined, gap = GUTTER, bottomH?: nu
     }
     return { items, w: Math.max(0, x - gap), h, pos };
   }
-  const rows: Geo[][] = [];
+  // consecutive items of one kind form a grid that is as close to square as the pitches allow; kinds stack with a gap between
+  const runs: Geo[][] = [];
   for (const it of items) {
-    const row = rows[rows.length - 1];
-    if (row && row.length < ROW_MAX && kindRank(row[0]!.kind) === kindRank(it.kind)) row.push(it);
-    else rows.push([it]);
+    const run = runs[runs.length - 1];
+    if (run && kindRank(run[0]!.kind) === kindRank(it.kind)) run.push(it);
+    else runs.push([it]);
   }
   let y = 0;
   let w = 0;
-  for (const row of rows) {
-    const rh = Math.max(...row.map((i) => i.h));
-    let x = 0;
-    row.forEach((it, i) => {
-      pos.set(it.id, { x: x + it.w / 2, y: y + rh / 2 });
-      x += it.w + (row[i + 1] ? clearance(it, row[i + 1]!) : 0);
+  runs.forEach((run, ri) => {
+    const cols = bestCols(run);
+    const rows: Geo[][] = [];
+    for (let i = 0; i < run.length; i += cols) rows.push(run.slice(i, i + cols));
+    rows.forEach((row, k) => {
+      const rh = Math.max(...row.map((i) => i.h));
+      let x = 0;
+      row.forEach((it, i) => {
+        pos.set(it.id, { x: x + it.w / 2, y: y + rh / 2 });
+        x += it.w + (row[i + 1] ? clearance(it, row[i + 1]!) : 0);
+      });
+      w = Math.max(w, x);
+      y += rh + (rows[k + 1] ? rowGap(row, rows[k + 1]!) : runs[ri + 1] ? 2 * GUTTER - 4 : 0); // room for the next kind's label
     });
-    w = Math.max(w, x);
-    y += rh + 2 * GUTTER - 4; // room for the next group's label
+  });
+  return { items, w, h: y, pos };
+}
+
+/** Columns for a grid of n similar items: the width/height ratio closest to square (ties go to the wider grid). */
+function bestCols(run: Geo[]): number {
+  const n = run.length;
+  if (n <= 4) return n; // a handful stays in one row
+  const mw = Math.max(...run.map((g) => g.w));
+  const mh = Math.max(...run.map((g) => g.h));
+  const cl = clearance(run[0]!, run[0]!);
+  let best = 1;
+  let score = Infinity;
+  for (let c = 1; c <= Math.min(n, ROW_MAX); c++) {
+    const r = Math.ceil(n / c);
+    const sc = Math.abs(Math.log((c * mw + (c - 1) * cl) / (r * mh + (r - 1) * cl)));
+    if (sc <= score + 1e-9) (best = c, (score = sc));
   }
-  return { items, w, h: Math.max(0, y - (2 * GUTTER - 4)), pos };
+  return best;
 }
 
 const REAR_Y: Record<string, number> = { usb: 7.5, 'midi-port': 9, 'usb-c-power': 7.5 }; // above the bottom plate: USB lines up with the board's connector
@@ -276,7 +299,7 @@ function placeRear(spec: DeviceSpec, items: Geo[], old: Geo[], placements: Layou
   const top = (g: Geo) => placements[g.id]!.y + g.h / 2;
   const serviceTop = Math.max(thickness, ...[...old.filter((g) => !isSlot(g)), ...service].map(top));
   let right = Math.max(0, ...[...old, ...service].map(edge));
-  let needH = 0;
+  let needH = serviceTop + thickness + 2; // the wall must hold the service row (USB, MIDI, power)
   if (slots.length || old.some(isSlot)) {
     const oldSlot = old.find(isSlot);
     const slotH = (slots[0] ?? oldSlot)!.h;
@@ -291,7 +314,7 @@ function placeRear(spec: DeviceSpec, items: Geo[], old: Geo[], placements: Layou
       placements[g.id] = { x: sx, y: cy, face: 'rear' };
       last = sx;
     }
-    needH = cy + slotH / 2 + thickness + 3;
+    needH = Math.max(needH, cy + slotH / 2 + thickness + 3);
     right = Math.max(right, last + (slots[0] ?? oldSlot)!.w / 2);
     for (const g of slots) right = Math.max(right, edge(g));
   }
@@ -385,8 +408,9 @@ function layoutPass(spec: DeviceSpec, opt: { restMaxH?: number; gap?: number }):
     annotations.push({ id: `num-${g.id}`, kind: 'text', x: Math.round((MARGIN + stripX[i]! - 0.3 * size * text.length) * 10) / 10, y: top - GROUP_PAD - 4.5, text, size });
   });
 
-  const panelDepth = Math.ceil(depth + top + MARGIN);
-  const panelWidth = Math.ceil(width + 2 * MARGIN);
+  const blank = all.size === 0; // nothing on top yet: a panel big enough for the board and the rear ports
+  const panelDepth = Math.max(Math.ceil(depth + top + MARGIN), blank ? 70 : 0);
+  const panelWidth = Math.max(Math.ceil(width + 2 * MARGIN), blank ? 90 : 0);
   const items = [...all.values()];
   const maxBody = Math.max(0, ...items.map((g) => g.fp.bodyDepth));
   const boardH = MCUS[spec.mcu].board.height;
@@ -406,7 +430,7 @@ function layoutPass(spec: DeviceSpec, opt: { restMaxH?: number; gap?: number }):
       height = topH;
       const front = Math.max(2 * thickness + 15, ...items.filter((g) => placements[g.id]!.y > 0).map((g) => height + ((g.fp.bodyDepth + 3 - (height - 2 * thickness)) * panelDepth) / placements[g.id]!.y));
       frontHeight = Math.ceil(front);
-      if (frontHeight >= height) frontHeight = undefined;
+      if (height - frontHeight < 3) frontHeight = undefined; // not worth a wedge
     }
   }
   return {
@@ -432,6 +456,17 @@ export function ensureLayout(spec: DeviceSpec): DeviceSpec {
   const missTop = missing.filter((g) => g.face === 'top').sort((a, b) => kindRank(a.kind) - kindRank(b.kind));
   const placed = geos(out).filter((g) => lay.placements[g.id]);
   if (missTop.length) {
+    // Untouched layout (exactly what autoLayout makes of the controls placed so far)? Then lay everything out again, so that
+    // controls added one by one end up in a compact grid instead of one column below the other.
+    const ids = new Set(placed.map((g) => g.id));
+    const base: DeviceSpec = { ...structuredClone(out), layout: undefined, controls: out.controls.filter((c) => ids.has(c.id)), meters: (out.meters ?? []).filter((m) => ids.has(m.id)) };
+    const auto = autoLayout(base);
+    const same = placed.every((g) => {
+      const a = auto.placements[g.id];
+      const b = lay.placements[g.id]!;
+      return a && Math.abs(a.x - b.x) < 0.05 && Math.abs(a.y - b.y) < 0.05 && (a.face ?? 'top') === (b.face ?? 'top');
+    });
+    if (same) return { ...out, layout: autoLayout(out) };
     const bottom = Math.max(MARGIN - GUTTER, ...placed.filter((g) => g.face === 'top').map((g) => lay.placements[g.id]!.y + g.h / 2));
     const b = flow(missTop, undefined);
     b.pos.forEach((p, id) => (lay.placements[id] = { x: MARGIN + p.x, y: bottom + GUTTER + p.y }));

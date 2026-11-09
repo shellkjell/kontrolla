@@ -213,7 +213,8 @@ test('mixer presets: audio bindings point at real controls and meters; no valida
     expect(validateLayout(spec).filter((i) => i.severity !== 'info'), name).toEqual([]);
     const ids = new Set([...spec.controls.map((c) => c.id), ...spec.meters!.map((m) => m.id)]);
     for (const ch of spec.audio!.channels) {
-      expect(Object.keys(ch.bind).sort(), ch.id).toEqual(['cue', 'eqHi', 'eqHiMid', 'eqLo', 'eqLoMid', 'fader', 'filter', 'fxSend', 'gain', 'inputSelect', 'mute', 'pan', 'solo']);
+      const sel = IO_MODULES[spec.ioSlots!.find((x) => x.id === ch.slot)!.module]!.selectable;
+      expect(Object.keys(ch.bind).sort(), ch.id).toEqual(['cue', 'eqHi', 'eqHiMid', 'eqLo', 'eqLoMid', 'fader', 'filter', 'fxSend', 'gain', ...(sel ? ['inputSelect'] : []), 'mute', 'pan', 'solo']);
       for (const id of Object.values(ch.bind)) expect(ids.has(id!), id).toBe(true);
       expect(ids.has(ch.meter!), ch.meter).toBe(true);
       expect(spec.ioSlots!.some((s) => s.id === ch.slot)).toBe(true);
@@ -227,7 +228,7 @@ test('mixer-6ch is the unproven 2-codec board with mixed input modules, mixer-3c
   const six = EXAMPLES['mixer-6ch']!;
   expect(six.audio!.board).toBe('teensy41-cs42448x2');
   expect(six.ioSlots!.map((s) => s.module)).toEqual(['io-trs-rca-combo', 'io-trs-rca-combo', 'io-trs-rca-combo', 'io-trs-rca-combo', 'io-xlr', 'io-dual-xlr']);
-  expect(validateAudio(six).some((i) => i.severity === 'warning' && i.message.includes('UNPROVEN'))).toBe(true);
+  expect(validateAudio(six).some((i) => i.severity === 'warning' && /unproven/i.test(i.message))).toBe(true);
   const three = EXAMPLES['mixer-3ch']!;
   expect(three.name).toBe('Portable Mixer 3 — proven');
   expect(three.audio!.board).toBe('teensy41-cs42448');
@@ -308,4 +309,67 @@ test('mixer-6ch: the master section widens to the rear wall width, faders level,
   expect(p.tap!.y).toBe(p['ch1-input']!.y);
   expect(s.layout!.panel.width).toBeLessThan(rearRight + 20);
   for (const name of Object.keys(EXAMPLES)) expect(validateLayout(EXAMPLES[name]!), name).toEqual([]);
+});
+
+// ---- UX audit asks ----
+
+test('a blank design lays out without errors (panel sized to the board and the rear ports)', () => {
+  const blank = { version: 1 as const, name: 'B', mcu: 'rp2040-pico' as const, usbProductName: 'x', muxes: [], controls: [] };
+  const lay = autoLayout(blank);
+  expect(lay.panel.width).toBeGreaterThanOrEqual(80);
+  expect(validateLayout({ ...blank, layout: lay })).toEqual([]);
+  expect(validateLayout(ensureLayout(blank))).toEqual([]);
+  const t = { ...blank, mcu: 'teensy41' as const };
+  expect(validateLayout(ensureLayout(t))).toEqual([]);
+});
+
+test('controls added one at a time end up in a compact grid, not one column', () => {
+  let s: ReturnType<typeof ensureLayout> = ensureLayout({ version: 1, name: 'B', mcu: 'rp2040-pico', usbProductName: 'x', muxes: [], controls: [] });
+  for (let i = 1; i <= 8; i++) {
+    s.controls.push({ id: `k${i}`, kind: 'pot', part: 'pot-b10k', label: `Knob ${i}`, midi: { type: 'cc', channel: 1, cc: 20 + i, min: 0, max: 127 }, deadband: 12, smoothing: 64 });
+    s = ensureLayout(s);
+  }
+  const pts = s.controls.map((c) => s.layout!.placements[c.id]!);
+  const w = Math.max(...pts.map((p) => p.x)) - Math.min(...pts.map((p) => p.x));
+  const h = Math.max(...pts.map((p) => p.y)) - Math.min(...pts.map((p) => p.y));
+  expect(w).toBeGreaterThan(30);
+  expect(Math.max(w, h) / Math.min(w, h)).toBeLessThan(1.6); // roughly square
+  expect(validateLayout(s).filter((i) => i.severity !== 'info')).toEqual([]);
+  // 12 knobs in one go: wraps too, spacing respects the knob pitch
+  const many = autoLayout({ ...s, layout: undefined, controls: Array.from({ length: 12 }, (_, i) => ({ ...s.controls[0]!, id: `m${i}` })) });
+  expect(Math.max(...Object.values(many.placements).filter((p) => !p.face).map((p) => p.y))).toBeLessThan(100);
+});
+
+test('issue messages are plain: no doubled UNPROVEN, no raw module ids, no pointless A/B notes in the presets', () => {
+  for (const name of ['mixer-6ch', 'mixer-3ch']) {
+    const spec = allocatePins(EXAMPLES[name]!);
+    const msgs = [...validateAudio(spec), ...validateLayout(spec)].map((i) => i.message);
+    for (const m of msgs) {
+      expect(m, m).not.toMatch(/UNPROVEN: UNPROVEN|is UNPROVEN/);
+      expect(m, m).not.toMatch(/\bio-[a-z-]+|\bout-[a-z-]+/);
+      expect(m, m).not.toContain('does nothing');
+    }
+  }
+});
+
+test('buildSteps focus ids all resolve to something on the device', () => {
+  const spec = allocatePins(EXAMPLES['mixer-6ch']!);
+  const known = new Set([
+    ...spec.controls.map((c) => c.id), ...spec.meters!.map((m) => m.id), ...spec.groups!.map((g) => g.id), ...spec.muxes.map((m) => m.id),
+    ...Object.keys(spec.layout!.placements),
+  ]);
+  const steps = buildSteps(spec);
+  for (const st of steps) for (const id of st.focus ?? []) expect(known.has(id), `${st.title}: ${id}`).toBe(true);
+  const by = (t: string) => steps.find((x) => x.title.startsWith(t))!;
+  expect(by('Mount').focus).toEqual(['usb']);
+  expect(by('Power rails').focus).toEqual(['usb-c-power']);
+  expect(by('MIDI port').focus).toEqual(['midi-port']);
+  expect(by('Multiplexer').focus).toEqual(spec.muxes.map((m) => m.id));
+  expect(by('Wire Ch 1').focus).toContain('ch1');
+  expect(by('Wire Ch 1').focus).toContain('ch1-gain');
+  expect(by('Wire Master').focus).toContain('master-fader');
+  expect(by('Audio 3/5').focus).toEqual(['ch1-io', 'ch1']);
+  expect(by('Audio 4/5').focus).toEqual(['ch2-io', 'ch3-io', 'ch4-io', 'ch5-io', 'ch6-io']);
+  expect(by('Audio 5/5').focus).toContain('master:out-xlr-pair');
+  expect(by('Make the panel').focus).toBeUndefined();
 });

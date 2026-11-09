@@ -30,6 +30,10 @@ export interface Bom {
 export interface BuildStep {
   title: string;
   details: string[];
+  /** Ids this step is about, so a UI can highlight them: control and meter ids, group ids, mux ids, I/O slot ids
+   *  ("master:<module>" for a fixed master output), and the rear/top ports "usb", "midi-port", "usb-c-power", "phones-63", "phones-35".
+   *  Absent = the step concerns the whole device. */
+  focus?: string[];
 }
 
 const shop = (partNumber: string) => ({
@@ -167,6 +171,7 @@ export function buildSteps(spec: DeviceSpec): BuildStep[] {
   });
   steps.push({ title: 'Gather the parts', details: ['Order everything on the parts list. Check each part number: look-alikes have different pin layouts.'] });
   steps.push({
+    focus: ['usb'],
     title: `Mount the ${board}`,
     details: [
       `Fix the ${board} inside the enclosure with its USB connector at an edge you can reach. Leave ${mcu.board.height} mm of height for the board and wires.`,
@@ -174,6 +179,7 @@ export function buildSteps(spec: DeviceSpec): BuildStep[] {
     ],
   });
   steps.push({
+    ...(spec.audio && { focus: ['usb-c-power'] }),
     title: 'Power rails',
     details: [
       pico ? '3V3 rail: Pico pin 36 (3V3 OUT) to a wire/bus strip. Ground rail: Pico pin 38 or 33 (AGND for pots) to another.' : '3.3 V rail: a Teensy 3.3V pin to a bus strip. Ground rail: a GND pin to another.',
@@ -183,6 +189,7 @@ export function buildSteps(spec: DeviceSpec): BuildStep[] {
   });
   if (spec.midiPort)
     steps.push({
+      focus: ['midi-port'],
       title: 'MIDI port on the rear wall',
       details: [
         `Fit the ${PARTS[spec.midiPort.part]?.name ?? 'MIDI jack'} in its rear-wall hole.`,
@@ -193,6 +200,7 @@ export function buildSteps(spec: DeviceSpec): BuildStep[] {
   if (spec.muxes.length) {
     const sel = spec.muxes[0]!.selectPins;
     steps.push({
+      focus: spec.muxes.map((m) => m.id),
       title: 'Multiplexer boards and the shared select bus',
       details: [
         `Select bus: S0 -> ${pin(sel[0])}, S1 -> ${pin(sel[1])}, S2 -> ${pin(sel[2])}, S3 -> ${pin(sel[3])}. Wire every mux board's S0-S3 to the SAME four wires.`,
@@ -202,8 +210,12 @@ export function buildSteps(spec: DeviceSpec): BuildStep[] {
   }
   const groupRows = new Map<string, WiringRow[]>();
   for (const r of wiring) if (r.control !== 'LED chain' && !spec.muxes.some((m) => m.id === r.control)) groupRows.set(r.group ?? 'Other controls', [...(groupRows.get(r.group ?? 'Other controls') ?? []), r]);
-  for (const [name, rows] of groupRows)
-    steps.push({ title: `Wire ${name}`, details: rows.map((r) => `${r.control}: ${r.connections.join('; ')}`) });
+  for (const [name, rows] of groupRows) {
+    const grp = spec.groups?.find((g) => g.label === name);
+    const grouped = new Set((spec.groups ?? []).flatMap((g) => g.members));
+    const ids = grp ? [grp.id, ...grp.members] : [...spec.controls.map((c) => c.id), ...(spec.meters ?? []).map((m) => m.id)].filter((id) => !grouped.has(id));
+    steps.push({ title: `Wire ${name}`, details: rows.map((r) => `${r.control}: ${r.connections.join('; ')}`), focus: ids });
+  }
 
   if (spec.leds) {
     const labelOf = (id: string) => spec.controls.find((c) => c.id === id)?.label ?? spec.meters?.find((m) => m.id === id)?.label ?? id;
@@ -212,6 +224,7 @@ export function buildSteps(spec: DeviceSpec): BuildStep[] {
       ...(spec.meters ?? []).map((m) => ({ start: m.ledStart, n: m.ledCount, id: m.id })),
     ].sort((a, b) => a.start - b.start);
     steps.push({
+      focus: chain.map((e) => e.id),
       title: 'LED chain (data line order)',
       details: [
         `Data: ${pin(spec.leds.pin)} -> 74AHCT125 level shifter (the LEDs run on 5 V, the ${board} outputs 3.3 V) -> 330 ohm -> DIN of LED #0.`,
@@ -310,6 +323,7 @@ function audioSteps(spec: DeviceSpec): BuildStep[] {
   const flag = (m: Maturity | undefined, why: string) => (m === 'experimental' ? ` [EXPERIMENTAL: ${why}]` : '');
   const steps: BuildStep[] = [];
   steps.push({
+    focus: ['usb-c-power'],
     title: 'Audio 1/5: power board (build and test it alone)',
     details: [
       `${POWER_BOARD.name}: ${POWER_BOARD.input} -> ${POWER_BOARD.rails.map((r) => `${r.rail} (up to ${r.maxMa} mA)`).join(', ')}.${flag(POWER_BOARD.maturity, POWER_BOARD.maturityNote)}`,
@@ -331,6 +345,7 @@ function audioSteps(spec: DeviceSpec): BuildStep[] {
   const firstSlot = first && spec.ioSlots?.find((s) => s.id === first.slot);
   const fm = firstSlot && IO_MODULES[firstSlot.module];
   steps.push({
+    focus: [...(firstSlot ? [firstSlot.id] : []), ...(first ? [first.id] : [])],
     title: 'Audio 3/5: one input module, then the test tone',
     details: [
       fm ? `Build ${fm.name} first (slot ${firstSlot!.label ?? firstSlot!.id}). Connectors: ${fm.connectors.map((c) => `${c.label}: ${PARTS[c.part]?.partNumber ?? c.part}`).join('; ')}.${flag(fm.maturity, fm.maturityNote)}` : 'Build any one input module first.',
@@ -341,6 +356,7 @@ function audioSteps(spec: DeviceSpec): BuildStep[] {
   });
   const rest = (spec.ioSlots ?? []).slice(1);
   steps.push({
+    focus: (spec.ioSlots ?? []).slice(1).map((s) => s.id),
     title: 'Audio 4/5: the remaining input modules',
     details: rest.length
       ? rest.map((s) => {
@@ -350,6 +366,7 @@ function audioSteps(spec: DeviceSpec): BuildStep[] {
       : ['No more input modules.'],
   });
   steps.push({
+    focus: [...a.master.outputs.map((m) => (IO_MODULES[m]?.mount === 'top' ? 'phones-63' : `master:${m}`)), ...(a.master.outputs.includes('out-phones') ? ['phones-35'] : [])],
     title: 'Audio 5/5: master and phones outputs',
     details: [
       ...a.master.outputs.map((id) => {

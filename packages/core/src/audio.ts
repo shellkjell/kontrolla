@@ -31,7 +31,8 @@ export function bindStripAudio(input: DeviceSpec, opts: BindOptions): DeviceSpec
     let meter: string | undefined;
     for (const id of g.members) {
       const key = id.startsWith(`${g.id}-`) ? id.slice(g.id.length + 1) : '';
-      if (STRIP_PARAMS[key]) bind[STRIP_PARAMS[key]!] = id;
+      // a strip only gets an input-select binding when its module has two input sets to choose between
+      if (STRIP_PARAMS[key] && !(STRIP_PARAMS[key] === 'inputSelect' && !IO_MODULES[opts.modules[Math.min(i, opts.modules.length - 1)]!]?.selectable)) bind[STRIP_PARAMS[key]!] = id;
       if (key === 'meter') meter = id;
     }
     const slot = spec.ioSlots![i]!;
@@ -59,15 +60,16 @@ export function validateAudio(spec: DeviceSpec): Issue[] {
 
   const board = AUDIO_BOARDS[a.board];
   if (!board) add('error', `Unknown audio board "${a.board}"`, undefined, `Use one of ${Object.keys(AUDIO_BOARDS).join(', ')}`);
-  else if (board.maturity === 'experimental') add('warning', `${board.name} is UNPROVEN: ${board.maturityNote}`, undefined, 'Breadboard it first, or use teensy41-cs42448 (3 channels)');
+  else if (board.maturity === 'experimental')
+    add('warning', `${board.name} is unproven. ${board.maturityNote.replace(/^UNPROVEN\.\s*/, '')}`, undefined, 'Breadboard it first, or use the one-codec board (3 channels), which is proven');
 
   const slotIds = new Set<string>();
   for (const s of spec.ioSlots ?? []) {
-    if (slotIds.has(s.id)) add('error', `Duplicate I/O slot id "${s.id}"`);
+    if (slotIds.has(s.id)) add('error', `Two I/O slots share the id "${s.id}"`);
     slotIds.add(s.id);
     const m = IO_MODULES[s.module];
-    if (!m) add('error', `Slot ${s.id} holds unknown module "${s.module}"`, undefined, 'Pick a module from the catalog');
-    else if (m.mount !== 'slot') add('error', `Module ${m.id} goes on the top panel, not in a rear slot (${s.id})`);
+    if (!m) add('error', `${slotName(spec, s.id)} holds a module the catalog does not know ("${s.module}")`, s.id, 'Pick a module from the catalog');
+    else if (m.mount !== 'slot') add('error', `${m.name} goes on the top panel, not in the rear slot of ${slotName(spec, s.id)}`, s.id);
   }
 
   const controls = new Map(spec.controls.map((c) => [c.id, c]));
@@ -86,33 +88,37 @@ export function validateAudio(spec: DeviceSpec): Issue[] {
   for (const ch of a.channels) {
     const slot = spec.ioSlots?.find((s) => s.id === ch.slot);
     const m = slot && IO_MODULES[slot.module];
-    if (!slot) add('error', `Channel ${ch.label} reads slot "${ch.slot}", which does not exist`, undefined, 'Add the slot or fix the id');
-    else if (m && m.direction !== 'in') add('error', `Channel ${ch.label} reads slot ${slot.id}, which holds an output module (${m.id})`);
-    if (slot && used.has(slot.id)) add('error', `Slot ${slot.id} feeds more than one channel`);
+    if (!slot) add('error', `${ch.label} reads an I/O slot that does not exist ("${ch.slot}")`, undefined, 'Add the slot or fix the id');
+    else if (m && m.direction !== 'in') add('error', `${ch.label} listens to ${slotName(spec, slot.id)}, which holds an output module (${m.name})`, slot.id);
+    if (slot && used.has(slot.id)) add('error', `${slotName(spec, slot.id)} feeds more than one channel`, slot.id);
     if (slot) used.add(slot.id);
     if (m) inputs += m.codecPorts;
-    if (m?.signal === 'mono' && ch.stereo) add('info', `${ch.label}: ${m.name} is mono; the engine feeds it to both sides`);
     for (const [param, id] of Object.entries(ch.bind)) bindOk(param as ChannelParam, id, ch.label);
     if (ch.meter && !meters.has(ch.meter)) add('error', `${ch.label}: meter "${ch.meter}" does not exist`, ch.meter);
-    if (ch.bind.inputSelect && m && !m.selectable) add('info', `${ch.label}: the A/B button does nothing with ${m.name} (one input set)`, ch.bind.inputSelect);
+    if (ch.bind.inputSelect && m && !m.selectable) add('info', `${ch.label}: the A/B button has no effect with ${m.name}, which has only one input`, ch.bind.inputSelect, 'Unbind the button or use a module with an A/B pair');
   }
-  for (const s of spec.ioSlots ?? []) if (!a.channels.some((c) => c.slot === s.id)) add('info', `Slot ${s.id} has no channel; it stays a blank plate`);
-  if (board && inputs > board.inputs) add('error', `The modules use ${inputs} codec inputs but ${board.name} has ${board.inputs}`, undefined, 'Use the 2-codec board (unproven) or fewer channels');
+  for (const s of spec.ioSlots ?? []) if (!a.channels.some((c) => c.slot === s.id)) add('info', `${slotName(spec, s.id)} has no channel, so it stays a blank plate`, s.id);
+  if (board && inputs > board.inputs) add('error', `The input modules use ${inputs} codec inputs but ${board.name} has only ${board.inputs}`, undefined, 'Use the 2-codec board (unproven) or fewer channels');
 
   for (const [param, id] of Object.entries(a.master.bind)) bindOk(param as MasterParam, id, 'Master');
   for (const [side, id] of Object.entries(a.master.meters ?? {})) if (id && !meters.has(id)) add('error', `Master ${side} meter "${id}" does not exist`, id);
   const buses = new Set<string>();
   for (const id of a.master.outputs) {
     const m = IO_MODULES[id];
-    if (!m) add('error', `Unknown master output module "${id}"`);
-    else if (m.direction !== 'out') add('error', `Master output ${id} is an input module`);
+    if (!m) add('error', `The master outputs list a module the catalog does not know ("${id}")`);
+    else if (m.direction !== 'out') add('error', `${m.name} is an input module but is listed as a master output`);
     else if (m.bus) buses.add(m.bus);
   }
   if (board && buses.size * 2 > board.outputs) add('error', `${buses.size} output buses need ${buses.size * 2} codec outputs but ${board.name} has ${board.outputs}`);
   const exp = [...new Set([...(spec.ioSlots ?? []).map((s) => s.module), ...a.master.outputs])].filter((id) => IO_MODULES[id]?.maturity === 'experimental');
-  if (exp.length) add('info', `Experimental modules (candidate front ends, nothing built): ${exp.join(', ')}`);
+  if (exp.length) add('info', `These modules are candidates, nothing has been built yet: ${exp.map((id) => IO_MODULES[id]!.name).join('; ')}`);
   return out;
 }
+
+const slotName = (spec: DeviceSpec, id: string) => {
+  const s = spec.ioSlots?.find((x) => x.id === id);
+  return s ? `The ${s.label ?? s.id} slot` : `The slot "${id}"`;
+};
 
 /** The module sitting in a rear slot: an I/O slot id, or "master:<module id>" for the fixed master outputs. */
 export function moduleOfSlot(spec: DeviceSpec, id: string): string | undefined {
