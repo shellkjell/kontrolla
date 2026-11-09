@@ -1,5 +1,5 @@
 // Generates the Teensy 4.1 + CS42448 audio-engine sketch for spec.audio. Same curves as curves.ts / docs/AUDIO.md.
-import type { DeviceSpec } from '@kontrolla/core';
+import { AUDIO_BOARDS, type DeviceSpec } from '@kontrolla/core';
 import { CHANNEL_DEFAULTS, CHANNEL_PARAMS, MASTER_DEFAULTS, MASTER_PARAMS } from './engine';
 
 type Src = [node: string, port: number];
@@ -34,8 +34,10 @@ const EQ_STAGE: Record<string, number> = { eqLo: 0, eqLoMid: 1, eqHiMid: 2, eqHi
 export function generateEngineSketch(spec: DeviceSpec): string {
   const audio = spec.audio;
   if (!audio) throw new Error('spec.audio is not set');
-  const codecs = audio.board.endsWith('x2') ? 2 : 1;
-  const cap = codecs * 3; // CS42448: 6 ADC = 3 stereo channels per codec
+  const board = AUDIO_BOARDS[audio.board];
+  if (!board) throw new Error(`Unknown audio board "${audio.board}"`);
+  const codecs = board.codecs;
+  const cap = board.stereoChannels; // CS42448: 6 ADC = 3 stereo channels per codec
   const chs = audio.channels.slice(0, cap);
   const N = chs.length;
   const g = new Gen();
@@ -331,6 +333,9 @@ ${codecs > 1 ? '  codec1.enable(); codec1.volume(1.0); // UNPROVEN\n' : ''}  for
   }
   for (int p = 0; p < 5; p++) applyMaster(p);
   fv.roomsize(0.7f); fv.damping(0.5f);
+  delay(200); // let the surface come up, then ask it for every control position (CONTRACTS §2.5)
+  static const uint8_t REQ[5] = { 0xF0, 0x7D, 0x6B, 0x01, 0xF7 };
+  Serial1.write(REQ, 5);
 }
 
 void loop() {

@@ -1,7 +1,7 @@
 import { describe, expect, test } from 'bun:test';
 import type { AnalogControl, ButtonControl, DeviceSpec } from '@kontrolla/core';
 import {
-  BLOCK, SAMPLE_RATE, createMixerEngine, cueMixGains, eqDb, faderDb, filterMode, gainDb, gainStaging, generateEngineSketch, highShelf,
+  BLOCK, SAMPLE_RATE, SNAPSHOT_REQUEST, capacityIssues, createMixerEngine, cueMixGains, eqDb, faderDb, filterMode, gainDb, defaultTrimDb, gainStaging, generateEngineSketch, highShelf,
   levelDb, lowShelf, magDb, meterCc, panBalance, panMono, peaking, renderSource, Reverb, SOURCES, type EngineOutputs, type MixerEngine,
   type SourceId,
 } from '../src';
@@ -28,7 +28,7 @@ const spec: DeviceSpec = {
     { id: 'mL', part: 'meter-led-bar', ledStart: 16, ledCount: 8, midi: { channel: 1, cc: 102 } },
     { id: 'mR', part: 'meter-led-bar', ledStart: 24, ledCount: 8, midi: { channel: 1, cc: 103 } },
   ],
-  ioSlots: [{ id: 's1', module: 'io-dual-trs' }, { id: 's2', module: 'io-xlr' }],
+  ioSlots: [{ id: 's1', module: 'io-trs-rca-combo' }, { id: 's2', module: 'io-xlr' }],
   audio: {
     board: 'teensy41-cs42448x2',
     channels: [
@@ -45,6 +45,8 @@ const spec: DeviceSpec = {
   },
 };
 
+/** Engine with the catalog trims overridden to 0 dB: inputs are then ADC-domain samples. */
+const mk = () => createMixerEngine(spec, { trimDb: [0, 0] });
 const mkOut = (): EngineOutputs => ({
   master: [new Float32Array(BLOCK), new Float32Array(BLOCK)],
   booth: [new Float32Array(BLOCK), new Float32Array(BLOCK)],
@@ -130,7 +132,7 @@ describe('engine', () => {
   const stereoIn = (v: number) => [[dc(v), dc(v)], [dc(0), dc(0)]];
 
   test('defaults are bit-transparent for a stereo channel', () => {
-    const e = createMixerEngine(spec);
+    const e = mk();
     const x = sine(1000, 0.3);
     const out = run(e, () => [[x, x]], 4);
     expect(Array.from(out.master[0])).toEqual(Array.from(x));
@@ -138,19 +140,19 @@ describe('engine', () => {
   });
   test('EQ deadzone 62..66 and filter bypass are bit-transparent; engaged filter is not', () => {
     const x = sine(1000, 0.3);
-    const ref = Array.from(run(createMixerEngine(spec), () => [[x, x]], 2).master[0]);
+    const ref = Array.from(run(mk(), () => [[x, x]], 2).master[0]);
     for (const cc of [62, 63, 64, 65, 66]) {
-      const e = createMixerEngine(spec);
+      const e = mk();
       for (const p of ['eqLo', 'eqLoMid', 'eqHiMid', 'eqHi', 'filter'] as const) e.setParam(0, p, cc);
       expect(Array.from(run(e, () => [[x, x]], 2).master[0])).toEqual(ref);
     }
-    const e = createMixerEngine(spec);
+    const e = mk();
     e.setParam(0, 'filter', 10); // low-pass ≈ 200 Hz: kills 1 kHz
     expect(rms(run(e, () => [[sine(1000, 0.3, 0), sine(1000, 0.3, 0)]], 20).master[0])).toBeLessThan(0.3 * Math.SQRT1_2 * 0.2);
   });
   test('EQ kill / boost through the engine', () => {
     const level = (cc: number, f: number) => {
-      const e = createMixerEngine(spec);
+      const e = mk();
       e.setParam(0, 'eqLoMid', cc);
       let o = mkOut(), s = sine(f, 0.1);
       for (let b = 0; b < 40; b++) { s = sine(f, 0.1, b * BLOCK); o = run(e, () => [[s, s]], 1); }
@@ -161,14 +163,14 @@ describe('engine', () => {
     expect(level(64, 400)).toBeCloseTo(0, 6);
   });
   test('fader 0 is silent; fader curve in the signal path', () => {
-    const e = createMixerEngine(spec);
+    const e = mk();
     e.setParam(0, 'fader', 0);
     expect(run(e, () => stereoIn(0.5), 3).master[0].every((v) => v === 0)).toBe(true);
     e.setParam(0, 'fader', 127);
     expect(run(e, () => stereoIn(0.1), 3).master[0][5]).toBeCloseTo(0.1 * lin(6), 5);
   });
   test('solo-in-place, mute wins', () => {
-    const e = createMixerEngine(spec);
+    const e = mk();
     const inp = () => [[dc(0.1), dc(0.1)], [dc(0.2), dc(0.2)]];
     const lvl = () => run(e, inp, 3).master[0][0]!;
     // ch2 is mono dual-mono, pan centre = −3 dB per side
@@ -188,7 +190,7 @@ describe('engine', () => {
     expect(lvl()).toBeCloseTo(c1 + c2, 6);
   });
   test('cue PFL ignores fader and mute, bypasses master', () => {
-    const e = createMixerEngine(spec);
+    const e = mk();
     e.setMasterParam('cueMix', 0); // cue only
     e.setMasterParam('phones', 127);
     e.handleMidi([0x90, 12, 100]); // cue ch1
@@ -203,7 +205,7 @@ describe('engine', () => {
     expect(run(e, () => [[dc(0.25), dc(0.25)], [dc(0), dc(0)]], 3).phones[0][3]).toBe(0);
   });
   test('booth is a copy of master with its own level', () => {
-    const e = createMixerEngine(spec);
+    const e = mk();
     e.setMasterParam('booth', 1); // −60 dB
     const o = run(e, () => stereoIn(0.5), 3);
     expect(o.master[0][0]).toBeCloseTo(0.5, 6);
@@ -211,14 +213,14 @@ describe('engine', () => {
   });
   test('FX send → reverb tail on master, deterministic', () => {
     const go = () => {
-      const e = createMixerEngine(spec);
+      const e = mk();
       e.setParam(0, 'fxSend', 127);
       e.setParam(0, 'fader', 0); // dry silent; wet follows post-fader so also silent
       return run(e, (b) => stereoIn(b === 0 ? 0.5 : 0), 3);
     };
     expect(go().master[0].every((v) => v === 0)).toBe(true);
     const wet = () => {
-      const e = createMixerEngine(spec);
+      const e = mk();
       e.setParam(0, 'fxSend', 127);
       let tail = 0;
       const o = mkOut();
@@ -249,7 +251,7 @@ describe('engine', () => {
 
   describe('MIDI bindings', () => {
     test('resolves via spec.audio → control id → MIDI target', () => {
-      const e = createMixerEngine(spec);
+      const e = mk();
       expect(e.handleMidi([0xb0, 20, 33])).toBe(true);
       expect(e.getParam(0, 'fader')).toBe(33);
       expect(e.handleMidi([0xb0, 90, 12])).toBe(true);
@@ -259,14 +261,14 @@ describe('engine', () => {
       expect(e.handleMidi([0x90, 20, 1])).toBe(false); // wrong type
     });
     test('control min/max range is normalised to 0..127', () => {
-      const e = createMixerEngine(spec);
+      const e = mk();
       e.handleMidi([0xb0, 60, 100]); // f2: 0..100
       expect(e.getParam(1, 'fader')).toBe(127);
       e.handleMidi([0xb0, 60, 50]);
       expect(e.getParam(1, 'fader')).toBe(64);
     });
     test('buttons follow their ON/OFF state (note and CC targets)', () => {
-      const e = createMixerEngine(spec);
+      const e = mk();
       const sel: string[] = [];
       e.onInputSelect((c, s) => sel.push(`${c}${s}`));
       e.handleMidi([0x90, 10, 100]);
@@ -281,7 +283,7 @@ describe('engine', () => {
       expect(sel).toEqual(['0B', '0A']);
     });
     test('input select picks A/B of a 4-array input', () => {
-      const e = createMixerEngine(spec);
+      const e = mk();
       const inp = () => [[dc(0.1), dc(0.1), dc(0.3), dc(0.3)]];
       expect(run(e, inp).master[0][0]).toBeCloseTo(0.1, 6);
       e.setInputSelect(0, 'B');
@@ -291,7 +293,7 @@ describe('engine', () => {
 
   describe('meters and clip', () => {
     test('meter CC goes to the bound Meter midi, at ≤ 30 Hz, only on change', () => {
-      const e = createMixerEngine(spec);
+      const e = mk();
       const sent: { block: number; msg: number[] }[] = [];
       let blk = 0;
       e.onMidiOut((msg) => sent.push({ block: blk, msg }));
@@ -305,7 +307,7 @@ describe('engine', () => {
       expect(sent.some((s) => s.msg[1] === 101 && s.msg[0] === 0xb1)).toBe(true); // ch2 meter on MIDI channel 2
     });
     test('release ballistics ≈ 20 dB / 300 ms; message rate ≈ 30 Hz', () => {
-      const e = createMixerEngine(spec);
+      const e = mk();
       const times: number[] = [];
       let blk = 0;
       e.onMidiOut((msg) => { if (msg[1] === 100) times.push(blk); });
@@ -338,12 +340,74 @@ describe('engine', () => {
   });
 });
 
-describe('levels', () => {
-  test('gain staging per module', () => {
+describe('levels (from IO_MODULES)', () => {
+  test('gain staging per module input', () => {
     const rows = gainStaging(spec);
-    expect(rows[0]!.nominalDbfs).toBeCloseTo(4 - 2.218 - 12, 3); // +4 dBu with the 12 dB pad
-    expect(rows[1]!.nominalDbfs).toBeCloseTo(-50 - 2.218 + 40, 3); // mic, 40 dB preamp
+    expect(rows.map((r) => `${r.channel}${r.input}`)).toEqual(['ch1A', 'ch1B', 'ch2A']);
+    expect(rows[0]!.nominalDbfs).toBeCloseTo(1.8 - 12, 6); // 6.3 mm +4 dBu behind the 12 dB pad
+    expect(rows[1]!.nominalDbfs).toBeCloseTo(-10, 6); // RCA
+    expect(rows[2]!.nominalDbfs).toBeCloseTo(-52.2 + 40, 6); // mic, 40 dB preamp
     expect(rows[0]!.headroomDb).toBeCloseTo(-0.1 - rows[0]!.nominalDbfs, 6);
+    expect(defaultTrimDb(spec)).toEqual([[-12, 0], [40, 40]]);
+    expect(gainStaging(spec, { ch2: 20 })[2]!.trimDb).toBe(20);
+    expect(() => gainStaging(spec, { ch2: 70 })).toThrow(/outside/);
+  });
+  test('engine derives trim from the module; inputSelect switches it', () => {
+    const e = createMixerEngine(spec);
+    expect(e.getStats().channels[0]!).toMatchObject({ input: 'A', trimDb: -12 });
+    e.setInputSelect(0, 'B');
+    expect(e.getStats().channels[0]!).toMatchObject({ input: 'B', trimDb: 0 });
+    // +4 dBu line (1.228 Vrms) through A: lands at −10.2 dBFS, no ADC clip; the same jack level on B would clip
+    const o = mkOut();
+    const hot = dc(1.228);
+    e.setInputSelect(0, 'A');
+    e.process([[hot, hot]], o);
+    expect(e.getStats().channels[0]!.adc.clip).toBe(false);
+    expect(e.getStats().channels[0]!.adc.peakDb).toBeCloseTo(-10.2, 1);
+    e.setInputSelect(0, 'B');
+    e.process([[hot, hot]], o);
+    expect(e.getStats().channels[0]!.adc.clip).toBe(true);
+  });
+  test('unknown module / missing slot / output module are errors, not fallbacks', () => {
+    const bad = (module: string): DeviceSpec => ({ ...spec, ioSlots: [{ id: 's1', module }, { id: 's2', module: 'io-xlr' }] });
+    expect(() => createMixerEngine(bad('io-nonsense'))).toThrow(/unknown I\/O module/);
+    expect(() => createMixerEngine(bad('out-trs-rca-combo'))).toThrow(/not an input module/);
+    expect(() => createMixerEngine({ ...spec, ioSlots: [] })).toThrow(/holds no module/);
+    expect(() => createMixerEngine({ ...spec, audio: { ...spec.audio!, board: 'nope' } })).toThrow(/Unknown audio board/);
+  });
+});
+
+describe('boot snapshot request', () => {
+  test('every onMidiOut subscriber gets F0 7D 6B 01 F7 on subscribing; requestSnapshot repeats it', () => {
+    const e = mk();
+    const a: number[][] = [], b: number[][] = [];
+    e.onMidiOut((m) => a.push(m));
+    expect(a).toEqual([[0xf0, 0x7d, 0x6b, 0x01, 0xf7]]);
+    expect(SNAPSHOT_REQUEST).toEqual(a[0]!);
+    e.requestSnapshot();
+    e.onMidiOut((m) => b.push(m));
+    expect(a.length).toBe(2);
+    expect(b).toEqual([[0xf0, 0x7d, 0x6b, 0x01, 0xf7]]);
+    expect(e.handleMidi(a[0]!)).toBe(false); // SysEx is not a binding
+  });
+});
+
+describe('board capacity', () => {
+  const chan = (i: number) => ({ id: `x${i}`, label: `X${i}`, slot: 's2', stereo: true, bind: { fader: 'f1' } });
+  const over = (board: string, n: number): DeviceSpec => ({
+    ...spec, audio: { ...spec.audio!, board, channels: Array.from({ length: n }, (_, i) => chan(i)) },
+  });
+  test('proven board = 3 stereo channels, x2 = 6; the rest are reported and silent', () => {
+    expect(capacityIssues(over('teensy41-cs42448', 3))).toEqual([]);
+    expect(capacityIssues(over('teensy41-cs42448x2', 6))).toEqual([]);
+    expect(capacityIssues(over('teensy41-cs42448', 5)).length).toBe(2);
+    const e = createMixerEngine(over('teensy41-cs42448', 5), { trimDb: [0, 0, 0, 0, 0] });
+    const o = mkOut();
+    e.process(Array.from({ length: 5 }, () => [dc(0.1), dc(0.1)]), o);
+    const st = e.getStats();
+    expect(st.overCapacity).toEqual(['x3', 'x4']);
+    expect(st.channels.map((c) => c.active)).toEqual([true, true, true, false, false]);
+    expect(o.master[0][0]).toBeCloseTo(0.3, 6); // only the 3 active channels are summed
   });
 });
 

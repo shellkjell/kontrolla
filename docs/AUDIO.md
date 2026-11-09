@@ -32,7 +32,13 @@ a mono module (`AudioChannel.stereo = false`) feeds L into both sides (dual-mono
 - Unbound params keep their defaults: channel gain 106 (0 dB), EQ/filter/pan centre 64, fader 100 (0 dB), fxSend 0, buttons off.
   Master: master 100 (0 dB), booth 127, phones 90, cueMix 64, fxReturn 100.
 - **Boot sync:** the surface sends nothing at boot (first scan latches baselines), so the engine sends the snapshot request `F0 7D 6B 01 F7` (CONTRACTS §2.5)
-  on the port at boot and the surface answers with every analog value, toggle state and absolute encoder in one burst.
+  on the port at boot and the surface answers with every analog value, toggle state and absolute encoder in one burst (83 messages on the mixer-6ch preset).
+  Model: `onMidiOut(cb)` hands the request to every new subscriber on subscribing (so a late link still gets it); `requestSnapshot()` repeats it.
+  The AudioWorklet client replays the boot request to subscribers added after boot. Sketch: `setup()` writes the 5 bytes to `Serial1` after a 200 ms delay.
+- **Board capacity:** `AUDIO_BOARDS[board].stereoChannels` (proven board 3, two-codec board 6). Channels beyond it are **not processed** (silent) and are
+  reported: `getStats().overCapacity` (ids), `channels[i].active = false`, and `capacityIssues(spec)`. The sketch drops them too, with a warning in its header.
+- **Errors, not fallbacks:** an unknown board, a channel whose slot holds no module, an unknown IO_MODULES id or an output module in a channel slot throw
+  when the engine (or `gainStaging`) is created.
 
 ## 3. Signal path (per channel, per side)
 
@@ -50,9 +56,11 @@ Gain changes are ramped linearly across the block (as `AudioAmplifier` does); at
 
 ### 3.1 Input, trim, INPUT SELECT
 
-Input samples are **jack volts**: 1.0 = 1 Vrms. `trimDb` is the module's net analogue gain jack→ADC (a pad < 0, a mic preamp > 0);
-`x·10^(trimDb/20)` is then clamped to ±1 (the ADC clips). INPUT SELECT (A/B) chooses which connector set of a combo module
-feeds the channel: in the model `process()` gets `[AL, AR, BL, BR]` and picks; on the Teensy the sketch drives an `INSEL_PIN` (to be
+Input samples are **jack volts**: 1.0 = 1 Vrms. The trim is the catalog module's net analogue gain jack→ADC **per input** (A/B):
+`padDb + preampDb` from `IO_MODULES[module].inputs` (§5); `x·10^(trim/20)` is then clamped to ±1 (the ADC clips). `EngineOptions.trimDb`
+overrides it for both inputs of a channel, `preampDb[channelId]` sets a mic preamp (must lie in the module's `gainRangeDb`). INPUT SELECT (A/B) chooses which connector set of a combo module
+feeds the channel **and switches the trim** (A = 6.3 mm pro, −12 dB pad; B = RCA consumer, 0 dB on the combo module; `stats.channels[i].input/trimDb` show
+the active one). Only modules with `selectable` honour it. In the model `process()` gets `[AL, AR, BL, BR]` and picks; on the Teensy the sketch drives an `INSEL_PIN` (to be
 assigned) that switches the module's analogue input. `onInputSelect` fires on every change.
 
 ### 3.2 Curves
@@ -114,18 +122,10 @@ All three outputs clamp at ±1 (DAC full scale), after the clip detector.
 
 ## 5. Gain staging
 
-`levels.ts` has the module table (`MODULE_LEVELS`) and `gainStaging(spec)`. dBFS at the ADC = dBV at the jack + `trimDb`, assuming
-CS42448 full scale ≈ **1 Vrms** (the design brief's figure at VA 5 V; **not re-checked against the datasheet, and the DAC/output
-full scale is unverified**).
-
-| Module | Nominal | Net trim | Nominal at ADC |
-|---|---|---|---|
-| `io-rca` (consumer) | −10 dBV | 0 dB | −10 dBFS |
-| `io-dual-trs` (pro) | +4 dBu = +1.78 dBV | −12 dB pad | −10.2 dBFS |
-| `io-xlr` (mic) | −50 dBu = −52.2 dBV | +40 dB preamp (default) | −12.2 dBFS |
-| `io-trs-rca-combo` | A pro / B consumer | −12 dB (A); table models A | −10.2 dBFS |
-
-(The catalog's own IO_MODULES may supersede this table; unknown ids fall back to consumer.)
+Levels come from the core catalog (`IO_MODULES[id].inputs[]`: `nominalDbV`, `padDb`, `preampDb`); `levels.ts` has `gainStaging(spec)` (one row per
+channel and input) and `defaultTrimDb(spec)`. dBFS at the ADC = dBV at the jack + pad + preamp, assuming CS42448 full scale ≈ **1 Vrms**
+(the design brief's figure at VA 5 V; **not re-checked against the datasheet, and the DAC/output full scale is unverified**).
+Example rows (catalog values): 6.3 mm pro +1.8 dBV − 12 dB pad → −10.2 dBFS; RCA −10 dBV → −10 dBFS; XLR mic −52.2 dBV + 40 dB → −12.2 dBFS.
 
 Clipping is reported per stage in `getStats()`: **adc** (after trim, before the clamp), **pre** (after GAIN/EQ/FILTER, before the
 fader — where the 16-bit Teensy path saturates), **post** (after the fader), and **master** L/R. The model computes in float, so
@@ -135,7 +135,7 @@ A sum of channels near full scale clips the master bus on the Teensy (mixers sat
 ## 6. API (`@kontrolla/audio`)
 
 ```ts
-createMixerEngine(spec: DeviceSpec, opts?: { sampleRate?, trimDb?: number[], meterHz? }): MixerEngine
+createMixerEngine(spec: DeviceSpec, opts?: { sampleRate?, trimDb?: (number|undefined)[], preampDb?: Record<string, number>, meterHz? }): MixerEngine
 createAudioEngineNode(ctx, spec, inputs: (AudioNode|null)[], opts?: { trimDb?, workletUrl? }): Promise<AudioEngineNode>
 generateEngineSketch(spec): string
 renderSource(id, sampleRate?, seconds?): [Float32Array, Float32Array];  playSource(ctx, id, dest)
@@ -144,3 +144,11 @@ gainStaging(spec): StagingRow[]
 
 See the types in `engine.ts` / `client.ts`. The worklet has N stereo inputs (one per channel) and 3 stereo outputs
 `[master, booth, phones]` (`OUTPUT.master|booth|phones`).
+
+## 7. End-to-end test
+
+`packages/audio/test/e2e.test.ts` links the surface and the engine through the UART MIDI port (`sim.onPortMidi → engine.handleMidi`,
+`engine.onMidiOut → sim.sendPortMidi`) on the mixer-6ch preset, with the behavioural model and with the real RP2040 firmware (rp2040js), co-simulating
+3 ms of device time per 128-sample block. It checks the boot snapshot, then drums into ch1 and a −18 dBFS tone into ch2: fader, low-EQ kill,
+filter sweeps, mute, cue/PFL into the phones and solo-in-place move the audio as specified, and the ch1/ch2 meter LED bars (decoded from the WS2812
+frames) follow the audio. Model and firmware produce identical numbers. Runtime ≈ 11 s.

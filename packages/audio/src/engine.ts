@@ -1,25 +1,34 @@
 // Pure-TS mixer engine. Semantics: docs/AUDIO.md (this file is the browser reference; the Teensy sketch must match it).
 // No WebAudio dependency: runs in bun tests, in an AudioWorklet, or offline.
-import type { ChannelParam, Control, DeviceSpec, MasterParam } from '@kontrolla/core';
+import { AUDIO_BOARDS, type ChannelParam, type Control, type DeviceSpec, type MasterParam } from '@kontrolla/core';
 import {
   BLOCK, Biquad, CLIP_DB, EQ_BANDS, FILTER_Q, IDENTITY, SAMPLE_RATE, cueMixGains, dbToLin, eqDb, faderDb, filterMode, gainDb, highpass,
   levelDb, linToDb, lowpass, meterCc, panBalance, panMono,
 } from './curves';
 import { Reverb } from './fx';
+import { channelModule, trimDbFor } from './levels';
 
 export type Stereo = [Float32Array, Float32Array];
 export interface EngineOutputs { master: Stereo; booth: Stereo; phones: Stereo }
 
 export interface EngineOptions {
   sampleRate?: number; // default 44100
-  /** Per channel analogue gain between jack and ADC in dB (see levels.ts). Default 0 = inputs already in ADC full-scale units. */
-  trimDb?: number[];
+  /**
+   * Per channel analogue gain jack→ADC in dB, overriding the catalog module's pad/preamp for BOTH inputs (A and B). Default: derived from
+   * the channel's IO_MODULES entry, per input; inputSelect switches it. Inputs are jack volts (1.0 = 1 Vrms), see levels.ts.
+   */
+  trimDb?: (number | undefined)[];
+  /** Mic preamp gain per channel id (module default otherwise); must lie in the module's gainRangeDb. */
+  preampDb?: Record<string, number>;
   meterHz?: number; // meter CC rate, default 30
 }
 
 export interface StageStat { peakDb: number; clip: boolean }
 export interface ChannelStats {
   id: string;
+  active: boolean; // false = beyond the board's channel capacity: not processed, silent
+  input: 'A' | 'B'; // input of the module currently feeding the channel
+  trimDb: number; // analogue gain jack→ADC of that input
   adc: StageStat; // after trim, before the ADC clamp
   pre: StageStat; // after gain/EQ/filter, before the fader (the 16-bit headroom point on the Teensy)
   post: StageStat; // after the fader (the metered point)
@@ -31,8 +40,22 @@ export interface EngineStats {
   channels: ChannelStats[];
   master: { left: StageStat; right: StageStat; meterCc: [number, number] };
   anySolo: boolean;
+  /** Ids of channels beyond the board's capacity (AUDIO_BOARDS[board].stereoChannels): not processed. */
+  overCapacity: string[];
   cpu: number; // process() wall time / block duration, smoothed; 0 where no clock is available
   blocks: number;
+}
+
+/** Surface → engine snapshot request SysEx (CONTRACTS §2.5). The engine sends it to every onMidiOut subscriber on subscription. */
+export const SNAPSHOT_REQUEST: readonly number[] = [0xf0, 0x7d, 0x6b, 0x01, 0xf7];
+
+/** Capacity problems of spec.audio against its board (the engine drops these channels). Empty = fine. */
+export function capacityIssues(spec: DeviceSpec): string[] {
+  const a = spec.audio;
+  if (!a) return [];
+  const board = AUDIO_BOARDS[a.board];
+  if (!board) return [`Unknown audio board "${a.board}"`];
+  return a.channels.slice(board.stereoChannels).map((c) => `Channel ${c.label} (${c.id}) is beyond the ${board.stereoChannels} stereo channels of ${board.name}; it is not processed`);
 }
 
 export const CHANNEL_PARAMS: ChannelParam[] = [
@@ -56,8 +79,13 @@ export interface MixerEngine {
   process(inputs: Float32Array[][], outputs: EngineOutputs): void;
   /** The surface's outgoing MIDI (3-byte channel messages). Returns true when a binding matched. */
   handleMidi(msg: ArrayLike<number>): boolean;
-  /** Meter CCs for the surface, ~30 Hz, only changed values. */
+  /**
+   * Engine → surface MIDI: meter CCs (~30 Hz, only changed values) and the boot snapshot request, which every new subscriber
+   * receives immediately on subscribing (so the surface answers with all control positions).
+   */
   onMidiOut(cb: (msg: number[]) => void): () => void;
+  /** Send the snapshot request again (e.g. after the surface reconnects). */
+  requestSnapshot(): void;
   /** Fires when a channel's inputSelect flips (drives the module's A/B switch). */
   onInputSelect(cb: (channel: number, sel: 'A' | 'B') => void): () => void;
   /** Direct control (UI / tests), CC units 0..127. */
@@ -100,7 +128,9 @@ class Ramp {
 
 class Chan {
   p = { ...CHANNEL_DEFAULTS };
-  trim = 0;
+  trimA = 0; trimB = 0; selectable = false;
+  active = true;
+  get trim() { return this.selectable && this.p.inputSelect >= 64 ? this.trimB : this.trimA; }
   eq = [0, 1].map(() => EQ_BANDS.map(() => new Biquad()));
   flt = [new Biquad(), new Biquad()];
   eqApplied = [-1, -1, -1, -1];
@@ -122,9 +152,18 @@ export function createMixerEngine(spec: DeviceSpec, opts: EngineOptions = {}): M
   const meterPeriod = fs / (opts.meterHz ?? 30);
   const audio = spec.audio;
   const chDefs = audio?.channels ?? [];
-  const chans = chDefs.map((_, i) => {
+  const board = audio && AUDIO_BOARDS[audio.board];
+  if (audio && !board) throw new Error(`Unknown audio board "${audio.board}"`);
+  const chans = chDefs.map((cd, i) => {
     const c = new Chan();
-    c.trim = opts.trimDb?.[i] ?? 0;
+    const m = channelModule(spec, cd.id); // throws on unknown module / missing slot
+    const a = m.inputs![0]!, b = m.inputs![1] ?? a;
+    c.trimA = trimDbFor(m, a, opts.preampDb?.[cd.id]);
+    c.trimB = trimDbFor(m, b, opts.preampDb?.[cd.id]);
+    c.selectable = !!m.selectable && m.inputs!.length > 1;
+    const o = opts.trimDb?.[i];
+    if (o !== undefined) { c.trimA = c.trimB = o; }
+    c.active = i < board!.stereoChannels;
     return c;
   });
   const mp = { ...MASTER_DEFAULTS };
@@ -200,9 +239,10 @@ export function createMixerEngine(spec: DeviceSpec, opts: EngineOptions = {}): M
     fxInL.fill(0, 0, n); fxInR.fill(0, 0, n);
 
     chans.forEach((c, i) => {
+      if (!c.active) return;
       refreshFilters(c);
       const inp = inputs[i] ?? [];
-      const sel = c.p.inputSelect >= 64 && inp.length >= 4;
+      const sel = c.selectable && c.p.inputSelect >= 64 && inp.length >= 4;
       const sL = (sel ? inp[2] : inp[0]) ?? zeros;
       const sR = chDefs[i]!.stereo ? ((sel ? inp[3] : inp[1]) ?? zeros) : sL;
       const trim = dbToLin(c.trim);
@@ -333,12 +373,17 @@ export function createMixerEngine(spec: DeviceSpec, opts: EngineOptions = {}): M
     channelCount: chans.length,
     process,
     handleMidi,
-    onMidiOut(cb) { outSubs.add(cb); return () => void outSubs.delete(cb); },
+    onMidiOut(cb) {
+      outSubs.add(cb);
+      cb([...SNAPSHOT_REQUEST]);
+      return () => void outSubs.delete(cb);
+    },
+    requestSnapshot() { outSubs.forEach((cb) => cb([...SNAPSHOT_REQUEST])); },
     onInputSelect(cb) { selSubs.add(cb); return () => void selSubs.delete(cb); },
     setParam,
     setMasterParam,
     setInputSelect: (ch, sel) => setParam(ch, 'inputSelect', sel === 'B' ? 127 : 0),
-    setTrimDb(ch, db) { const c = chans[ch]; if (c) c.trim = db; },
+    setTrimDb(ch, db) { const c = chans[ch]; if (c) c.trimA = c.trimB = db; },
     getParam: (ch, p) => chans[ch]?.p[p] ?? 0,
     getMasterParam: (p) => mp[p],
     getStats() {
@@ -346,6 +391,7 @@ export function createMixerEngine(spec: DeviceSpec, opts: EngineOptions = {}): M
       return {
         channels: chans.map((c, i) => ({
           id: chDefs[i]!.id,
+          active: c.active, input: c.selectable && c.p.inputSelect >= 64 ? 'B' : 'A', trimDb: c.trim,
           adc: c.adc.stat(), pre: c.pre.stat(), post: c.post.stat(),
           clip: c.adc.clip || c.pre.clip || c.post.clip,
           meterCc: meterCc(linToDb(c.post.p)),
@@ -353,6 +399,7 @@ export function createMixerEngine(spec: DeviceSpec, opts: EngineOptions = {}): M
         })),
         master: { left: mPk[0]!.stat(), right: mPk[1]!.stat(), meterCc: [meterCc(linToDb(mPk[0]!.p)), meterCc(linToDb(mPk[1]!.p))] },
         anySolo: solo,
+        overCapacity: chDefs.filter((_, i) => !chans[i]!.active).map((c) => c.id),
         cpu,
         blocks,
       };

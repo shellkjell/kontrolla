@@ -10,8 +10,13 @@ export interface AudioEngineNode {
   node: AudioWorkletNode;
   /** The surface's outgoing MIDI (e.g. DeviceSim.onMidi / onPortMidi). */
   sendMidi(msg: number[]): void;
-  /** Meter CCs for the surface (feed DeviceSim.sendMidi / sendPortMidi). */
+  /**
+   * Engine → surface MIDI (feed DeviceSim.sendPortMidi): meter CCs, and the boot snapshot request SysEx `F0 7D 6B 01 F7`.
+   * A subscriber added after boot still receives the boot request once (replayed on subscription).
+   */
   onMidiOut(cb: (msg: number[]) => void): () => void;
+  /** Ask the surface for a fresh snapshot of every control (CONTRACTS §2.5). */
+  requestSnapshot(): void;
   onInputSelect(cb: (channel: number, sel: 'A' | 'B') => void): () => void;
   onStats(cb: (s: EngineStats) => void): () => void;
   /** Latest stats snapshot (~30 Hz), null before the first. */
@@ -23,7 +28,8 @@ export interface AudioEngineNode {
 }
 
 export interface ClientOptions {
-  trimDb?: number[];
+  trimDb?: (number | undefined)[];
+  preampDb?: Record<string, number>;
   /** URL of the bundled worklet. Vite: `import u from '@kontrolla/audio/worklet?worker&url'`. Default: ./worklet.ts next to this file. */
   workletUrl?: string | URL;
 }
@@ -40,15 +46,18 @@ export async function createAudioEngineNode(
   const node = new AudioWorkletNode(ctx, PROCESSOR_NAME, {
     numberOfInputs: n, numberOfOutputs: 3, outputChannelCount: [2, 2, 2],
     channelCount: 2, channelCountMode: 'explicit', channelInterpretation: 'speakers',
-    processorOptions: { spec, trimDb: opts.trimDb },
+    processorOptions: { spec, trimDb: opts.trimDb, preampDb: opts.preampDb },
   });
   inputs.forEach((src, i) => src && i < n && src.connect(node, 0, i));
 
   const midi = new Set<(m: number[]) => void>(), sel = new Set<(c: number, s: 'A' | 'B') => void>(), st = new Set<(s: EngineStats) => void>();
-  let last: EngineStats | null = null;
+  let last: EngineStats | null = null, boot: number[] | null = null;
   node.port.onmessage = (e) => {
     const m = e.data;
-    if (m.t === 'midi') midi.forEach((cb) => cb(m.msg));
+    if (m.t === 'midi') {
+      if (m.msg[0] === 0xf0) boot ??= m.msg;
+      midi.forEach((cb) => cb(m.msg));
+    }
     else if (m.t === 'insel') sel.forEach((cb) => cb(m.ch, m.sel));
     else if (m.t === 'stats') { last = m.stats; st.forEach((cb) => cb(m.stats)); }
   };
@@ -56,7 +65,11 @@ export async function createAudioEngineNode(
   return {
     node,
     sendMidi: (msg) => node.port.postMessage({ t: 'midi', msg }),
-    onMidiOut: (cb) => sub(midi, cb),
+    onMidiOut: (cb) => {
+      if (boot) cb(boot);
+      return sub(midi, cb);
+    },
+    requestSnapshot: () => node.port.postMessage({ t: 'snapshot' }),
     onInputSelect: (cb) => sub(sel, cb),
     onStats: (cb) => sub(st, cb),
     stats: () => last,

@@ -1,6 +1,6 @@
 // AudioWorkletProcessor around the engine. N stereo inputs (one per channel) → 3 stereo outputs [master, booth, phones].
 // Port protocol (client.ts is the only user):
-//   in : { t:'midi', msg:number[] } | { t:'param', ch, param, cc } | { t:'master', param, cc } | { t:'trim', ch, db }
+//   in : { t:'midi', msg:number[] } | { t:'param', ch, param, cc } | { t:'master', param, cc } | { t:'trim', ch, db } | { t:'snapshot' }
 //   out: { t:'midi', msg:number[] } | { t:'stats', stats } | { t:'insel', ch, sel:'A'|'B' }
 import type { DeviceSpec } from '@kontrolla/core';
 import { createMixerEngine, type MixerEngine } from './engine';
@@ -13,8 +13,8 @@ class MixerProcessor extends AudioWorkletProcessor {
   private n = 0;
   constructor(options: { processorOptions?: unknown }) {
     super(options);
-    const o = options.processorOptions as { spec: DeviceSpec; trimDb?: number[] };
-    this.engine = createMixerEngine(o.spec, { sampleRate, trimDb: o.trimDb });
+    const o = options.processorOptions as { spec: DeviceSpec; trimDb?: (number | undefined)[]; preampDb?: Record<string, number> };
+    this.engine = createMixerEngine(o.spec, { sampleRate, trimDb: o.trimDb, preampDb: o.preampDb });
     this.engine.onMidiOut((msg) => this.port.postMessage({ t: 'midi', msg }));
     this.engine.onInputSelect((ch, sel) => this.port.postMessage({ t: 'insel', ch, sel }));
     this.port.onmessage = (e: MessageEvent) => {
@@ -22,6 +22,7 @@ class MixerProcessor extends AudioWorkletProcessor {
       if (m.t === 'midi') this.engine.handleMidi(m.msg);
       else if (m.t === 'param') this.engine.setParam(m.ch, m.param, m.cc);
       else if (m.t === 'master') this.engine.setMasterParam(m.param, m.cc);
+      else if (m.t === 'snapshot') this.engine.requestSnapshot();
       else if (m.t === 'trim') this.engine.setTrimDb(m.ch, m.db);
     };
   }

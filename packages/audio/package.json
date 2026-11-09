@@ -3,6 +3,14 @@
   "version": "0.1.0",
   "private": true,
   "type": "module",
-  "exports": { ".": "./src/index.ts", "./worklet": "./src/worklet.ts" },
-  "dependencies": { "@kontrolla/core": "workspace:*" }
+  "exports": {
+    ".": "./src/index.ts",
+    "./worklet": "./src/worklet.ts"
+  },
+  "dependencies": {
+    "@kontrolla/core": "workspace:*"
+  },
+  "devDependencies": {
+    "@kontrolla/emulator": "workspace:*"
+  }
 }

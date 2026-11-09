@@ -46,6 +46,9 @@
         "@kontrolla/core": "workspace:*",
       },
     },
+      "devDependencies": {
+        "@kontrolla/emulator": "workspace:*",
+      },
     "packages/core": {
       "name": "@kontrolla/core",
       "version": "0.1.0",
