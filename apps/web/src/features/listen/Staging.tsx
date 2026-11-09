@@ -1,6 +1,7 @@
 import type { ChannelStats, EngineStats, StageStat } from '@kontrolla/audio';
 import type { DeviceSpec } from '@kontrolla/core';
 import type { Chan, Rig } from './rig';
+import { Term } from '../../components/fields';
 
 const FLOOR = -60;
 const fmt = (db: number) => (db > FLOOR ? `${db.toFixed(0)}` : '–∞');
@@ -61,7 +62,7 @@ export function Staging({ spec, rig, stats }: { spec: DeviceSpec; rig: Rig; stat
   return (
     <div className="staging" aria-label="Gain staging">
       <div className="shead" aria-hidden>
-        <span>Channel</span><span>At the ADC</span><span>After gain · EQ</span><span>After fader</span><span>What to do</span>
+        <span>Channel</span><span><Term means="The converter that turns the analogue signal into numbers. Past 0 dBFS it clips.">At the ADC</Term></span><span>After gain · EQ</span><span>After fader</span><span>What to do</span>
       </div>
       {spec.audio!.channels.map((ch, i) => {
         const s = stats?.channels[i];

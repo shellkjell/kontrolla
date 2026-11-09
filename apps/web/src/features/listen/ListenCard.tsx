@@ -25,37 +25,37 @@ const BUS_INFO: Record<Bus, { name: string; line: string }> = {
   phones: { name: 'Phones', line: 'Your headphones: channels with CUE on (before their faders) blended with the master by the CUE MIX knob.' },
 };
 
-export function ListenCard({ spec, bench, rig, stats, error, onPower, onPowerOff, busy }: Props) {
-  const board = spec.audio!;
+/**
+ * `part="bar"`: the transport (power, play, what you hear, volume): it sits above the panel so it is always in reach.
+ * `part="body"`: channel inputs and gain staging, below the panel.
+ */
+export function ListenCard({ spec, bench, rig, stats, error, onPower, onPowerOff, busy, part }: Props & { part: 'bar' | 'body' }) {
+  const [msg, setMsg] = useState('');
+  if (part === 'body') return rig ? <PoweredBody spec={spec} bench={bench} rig={rig} stats={stats} msg={msg} setMsg={setMsg} /> : null;
   return (
-    <section className="card listen" aria-labelledby="listen-h">
+    <section className="card listen transport" aria-labelledby="listen-h">
       <header>
-        <div>
-          <h2 id="listen-h">Audio</h2>
-        </div>
+        <h2 id="listen-h">Audio</h2>
         {rig ? <button className="btn" onClick={onPowerOff}>Power off</button> : <button className="btn primary big" onClick={onPower} disabled={!bench}>Power on the mixer</button>}
       </header>
       {!rig ? (
         <>
-          <p className="help">
-            Turn this mixer into a working audio mixer in your browser. Your knobs and buttons go through the real firmware and the MIDI port to an audio engine that does the gain, four-band EQ, filter, pan, FX, mute, solo and cue, and the meter LEDs on the panel light from the actual sound.
-          </p>
-          <p className="help">Nothing makes a sound until you press Play, and it starts quiet. The engine is a model of the Teensy audio code: the model is tested, the generated Teensy sketch has not been run on hardware.</p>
+          <p className="help">Run this mixer as a real audio mixer in your browser: your controls go through the real firmware to an audio engine, and the meter LEDs light from the sound. Channels 1 and 2 start with a drum loop and a bass line. It starts quiet and nothing plays until you press Play.</p>
           {error && <p className="callout warn" role="alert">{error}</p>}
         </>
       ) : (
-        <Powered spec={spec} bench={bench} rig={rig} stats={stats} busy={busy} board={board.board} />
+        <PoweredBar bench={bench} rig={rig} stats={stats} busy={busy} board={spec.audio!.board} msg={msg} setMsg={setMsg} />
       )}
     </section>
   );
 }
 
-function Powered({ spec, bench, rig, stats, busy, board }: { spec: DeviceSpec; bench: Bench | null; rig: Rig; stats: EngineStats | null; busy: boolean; board: string }) {
+function PoweredBar({ rig, stats, busy, board, msg, setMsg }: { bench: Bench | null; rig: Rig; stats: EngineStats | null; busy: boolean; board: string; msg: string; setMsg: (m: string) => void }) {
   const [sinks, setSinks] = useState<MediaDeviceInfo[]>([]);
-  const [msg, setMsg] = useState('');
   const playing = rig.playing();
   const bus = rig.monitor();
   const engine = rig.engine();
+  const silent = rig.channels().every((c) => c.sources.A.kind === 'none' && c.sources.B.kind === 'none');
   useEffect(() => {
     if (rig.canSetSink) rig.outputDevices().then(setSinks, () => {});
   }, [rig]);
@@ -72,6 +72,7 @@ function Powered({ spec, bench, rig, stats, busy, board }: { spec: DeviceSpec; b
         </small>
       </p>
       {msg && <p className="callout warn" role="alert">{msg}</p>}
+      {playing && silent && <p className="callout warn" role="status">Nothing is plugged into any channel, so there is nothing to hear. Choose a source under Channel inputs.</p>}
 
       <div className="monitoring">
         <button className={`btn big play${playing ? ' on' : ''}`} onClick={() => (playing ? rig.stop() : rig.play())} disabled={busy || !engine} aria-pressed={playing}>
@@ -81,7 +82,7 @@ function Powered({ spec, bench, rig, stats, busy, board }: { spec: DeviceSpec; b
           <span id="bus-l" className="lab">Listen to</span>
           <div className="seg" role="radiogroup" aria-labelledby="bus-l">
             {BUSES.map((b) => (
-              <button key={b} role="radio" aria-checked={bus === b} aria-pressed={bus === b} onClick={() => rig.setMonitor(b)}>{BUS_INFO[b].name}</button>
+              <button key={b} role="radio" aria-checked={bus === b} aria-pressed={bus === b} title={BUS_INFO[b].line} onClick={() => rig.setMonitor(b)}>{BUS_INFO[b].name}</button>
             ))}
           </div>
         </div>
@@ -99,8 +100,15 @@ function Powered({ spec, bench, rig, stats, busy, board }: { spec: DeviceSpec; b
           </div>
         )}
       </div>
-      <p className="help bus-line"><b>{BUS_INFO[bus].name}:</b> {BUS_INFO[bus].line} A safety limiter sits before your speakers, so a mistake can’t blast them.</p>
+      <p className="help bus-line"><b>{BUS_INFO[bus].name}:</b> {BUS_INFO[bus].line} A limiter sits before your speakers.</p>
+    </>
+  );
+}
 
+function PoweredBody({ spec, bench, rig, stats, msg, setMsg }: { spec: DeviceSpec; bench: Bench | null; rig: Rig; stats: EngineStats | null; msg: string; setMsg: (m: string) => void }) {
+  void msg;
+  return (
+    <section className="card listen body" aria-label="Channel inputs and gain staging">
       <h3 className="sub">Channel inputs</h3>
       <div className="strips">
         {rig.channels().map((c, i) => (
@@ -111,7 +119,7 @@ function Powered({ spec, bench, rig, stats, busy, board }: { spec: DeviceSpec; b
       <h3 className="sub">Gain staging</h3>
       <p className="help">Where each channel’s level sits at the ADC, after gain and EQ, and after the fader. A clip light stays on for a second after the last over.</p>
       <Staging spec={spec} rig={rig} stats={stats} />
-    </>
+    </section>
   );
 }
 

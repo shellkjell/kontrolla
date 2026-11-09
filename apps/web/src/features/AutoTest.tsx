@@ -11,11 +11,13 @@ interface Props {
   fidelity: 'firmware' | 'model' | null;
   /** The DAW pauses while this runs. */
   onRunning: (running: boolean) => void;
+  /** Called once a run has finished (not stopped): true when every control passed. */
+  onResult?: (passed: boolean) => void;
 }
 
 const STATUS = { pass: 'Pass', fail: 'Fail', warn: 'Check' } as const;
 
-export function AutoTest({ bench, noise, bounce, fidelity, onRunning }: Props) {
+export function AutoTest({ bench, noise, bounce, fidelity, onRunning, onResult }: Props) {
   const [rows, setRows] = useState<Row[] | null>(null);
   const [prog, setProg] = useState<Progress | null>(null);
   const [all, setAll] = useState(false);
@@ -34,7 +36,7 @@ export function AutoTest({ bench, noise, bounce, fidelity, onRunning }: Props) {
     onRunning(true);
     const acc: Row[] = [];
     try {
-      await runAutoTest(bench, {
+      const done = await runAutoTest(bench, {
         noise,
         bounce,
         onProgress: setProg,
@@ -42,6 +44,7 @@ export function AutoTest({ bench, noise, bounce, fidelity, onRunning }: Props) {
         aborted: () => abort.current,
       });
       if (abort.current) setNote('Stopped early. Results so far are below.');
+      else onResult?.(done.every((r) => r.status === 'pass'));
     } catch (e) {
       setNote(`The test stopped: ${e instanceof Error ? e.message : String(e)}`);
     } finally {

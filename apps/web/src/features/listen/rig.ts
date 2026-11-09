@@ -108,6 +108,9 @@ export function createRig(spec: DeviceSpec): Rig {
     return { id: c.id, module, sources: { A: { kind: 'none' }, B: { kind: 'none' } }, active: 'A', levelDb: 0, preampDb: undefined, jack, node: null, stream: null };
   });
 
+  // Play should make a sound: the first two channels start with a drum loop and a bass line
+  (['drums', 'bass'] as const).forEach((id, i) => chans[i] && (chans[i]!.sources.A = { kind: 'demo', id }));
+
   let eng: AudioEngineNode | null = null;
   let stats: EngineStats | null = null;
   let offs: (() => void)[] = [];

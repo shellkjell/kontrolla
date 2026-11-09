@@ -14,10 +14,26 @@ export function useMidiOut() {
   const [portId, setPortId] = useState('');
   const [webmidi, setWebmidi] = useState<'idle' | 'unsupported' | 'denied' | 'ready'>('idle');
   const [helperUp, setHelperUp] = useState(false);
+  const [helperAvailable, setHelperAvailable] = useState(false);
   const access = useRef<MIDIAccess | null>(null);
   const ws = useRef<WebSocket | null>(null);
   const live = useRef({ mode, portId });
   live.current = { mode, portId };
+
+  // The helper only exists on a developer's machine. Offer it only when something answers on its port.
+  useEffect(() => {
+    let probe: WebSocket | undefined;
+    // the helper only exists on a developer's own machine: a hosted copy never knocks on 127.0.0.1
+    if (!/^(localhost|127\.0\.0\.1|\[::1\])$/.test(location.hostname)) return;
+    try {
+      probe = new WebSocket(HELPER_URL);
+      probe.onopen = () => (setHelperAvailable(true), probe?.close());
+      probe.onerror = () => {};
+    } catch {
+      // no WebSocket to a local port from here
+    }
+    return () => probe?.close();
+  }, []);
 
   useEffect(() => {
     if (mode !== 'webmidi' || access.current) return;
@@ -67,5 +83,5 @@ export function useMidiOut() {
     else if (mode === 'helper' && ws.current?.readyState === WebSocket.OPEN) ws.current.send(JSON.stringify({ midi: msg }));
   }, []);
 
-  return { mode, setMode, ports, portId, setPortId, webmidi, helperUp, send };
+  return { mode, setMode, ports, portId, setPortId, webmidi, helperUp, helperAvailable, send };
 }

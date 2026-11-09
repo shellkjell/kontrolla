@@ -1,9 +1,9 @@
 import { memo, useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { bom } from '@kontrolla/core';
 import type { DeviceSim, DeviceSpec, Issue, SimOptions } from '@kontrolla/core';
-import { counts } from '../components/Issues';
+import { IssueBar } from '../components/Issues';
 import { Panel } from '../components/Panel';
-import { HELPER_URL, useMidiOut } from '../midiOut';
+import { useMidiOut } from '../midiOut';
 import { decode, simTime } from '../midi';
 import type { Decoded } from '../midi';
 import { labelOf } from '../pins';
@@ -18,15 +18,22 @@ import { AudioTest } from '../features/listen/AudioTest';
 import { ListenCard } from '../features/listen/ListenCard';
 import { audioDefaults } from '../features/listen/defaults';
 import { useListen, useStats } from '../features/listen/useListen';
+import { SoundCheck } from '../features/soundcheck/SoundCheck';
 
 interface Props {
   spec: DeviceSpec; // allocated
   issues: Issue[];
   /** Applies a tuning fix straight to the design (deadband / debounce). */
   patchControls: (fn: (c: DeviceSpec['controls'][number]) => DeviceSpec['controls'][number]) => void;
-  onBack: () => void;
+  /** Hidden while another step is showing: the simulator keeps running, the screen stops repainting. */
+  active: boolean;
+  /** Arrived from the Start page's "Try it": start the sound check straight away. */
+  autoSound: boolean;
+  designId: string;
+  onFix: (controlId?: string) => void;
   onEdit: (id?: string) => void;
-  onNext: () => void;
+  /** The control test finished: true when every check passed. */
+  onResult: (passed: boolean) => void;
 }
 
 interface Entry extends Decoded {
@@ -42,15 +49,24 @@ const SHOWN = 140;
 const FLOOD = 50; // msgs/s above which we say so
 
 const FIDELITY = {
-  firmware: { name: 'Firmware-level', line: 'Running the real compiled firmware in an RP2040 emulator, instruction by instruction. What you test is what you flash.' },
-  model: { name: 'Model-level', line: 'Running a faithful model of the firmware’s logic. The generated code itself isn’t executed, so a typo in it wouldn’t show up here.' },
+  firmware: { name: 'Runs your real firmware', line: 'The compiled firmware runs in an RP2040 emulator, instruction by instruction. What you test is what you flash.' },
+  model: { name: 'Close model of your firmware', line: 'A model of the firmware’s logic. The generated Arduino code isn’t run, so a typo in it wouldn’t show up here.' },
 } as const;
 
-export function Test({ spec, issues, patchControls, onBack, onEdit, onNext }: Props) {
+/** Plain names for the two fault settings; the numbers sit behind "Fine control". */
+const FAULTS = [
+  { id: 'clean', label: 'Clean', noise: 0, bounce: 0, line: 'Perfect parts.' },
+  { id: 'cheap', label: 'Cheap pots', noise: 8, bounce: 4, line: 'Slightly noisy pots and switches.' },
+  { id: 'long', label: 'Long wires', noise: 24, bounce: 8, line: 'Noisy pots and bouncy switches.' },
+] as const;
+
+export function Test({ spec, issues, active, autoSound, designId, patchControls, onFix, onEdit, onResult }: Props) {
   const [values, setValues] = useState<Record<string, number>>({});
   const [noise, setNoise] = useState(0);
   const [bounce, setBounce] = useState(0);
   const [seed, setSeed] = useState(1);
+  const [retry, setRetry] = useState(0);
+  const [forceModel, setForceModel] = useState(false);
   const [fidelity, setFidelity] = useState<DeviceSim['fidelity'] | null>(null);
   const [error, setError] = useState('');
   const [log, setLog] = useState<Entry[]>([]);
@@ -76,6 +92,8 @@ export function Test({ spec, issues, patchControls, onBack, onEdit, onNext }: Pr
   const specRef = useRef(spec);
   specRef.current = spec;
   const moveRef = useRef<(id: string, v: number) => void>(() => {});
+  const activeRef = useRef(active);
+  activeRef.current = active;
   const wiring = useMemo(() => bom(spec).wiring, [spec]);
   const listen = useListen(spec, bench);
   const stats = useStats(listen.rig);
@@ -116,7 +134,7 @@ export function Test({ spec, issues, patchControls, onBack, onEdit, onNext }: Pr
       const opts: SimOptions = { analogNoiseLsb: noise, buttonBounceMs: bounce, seed };
       let s: AppSim;
       try {
-        s = await createSim(spec, opts);
+        s = await createSim(spec, opts, forceModel);
       } catch (e) {
         if (!dead) setError(e instanceof Error ? e.message : String(e));
         return;
@@ -166,6 +184,7 @@ export function Test({ spec, issues, patchControls, onBack, onEdit, onNext }: Pr
         }
         while (times.length && times[0]! < now - 1000) times.shift();
         setRate(times.length);
+        if (!activeRef.current) return; // another step is showing: keep the device running, skip repainting
         if (dirty.current) (setLog([...entries]), (dirty.current = false));
         if (frameNew && frame) {
           frameNew = false;
@@ -189,7 +208,7 @@ export function Test({ spec, issues, patchControls, onBack, onEdit, onNext }: Pr
       sim.current?.dispose();
       sim.current = null;
     };
-  }, [spec, noise, bounce, seed]);
+  }, [spec, noise, bounce, seed, retry, forceModel]);
 
   const onAnalog = useCallback((id: string, v: number) => {
     setValues((p) => ({ ...p, [id]: v }));
@@ -220,67 +239,88 @@ export function Test({ spec, issues, patchControls, onBack, onEdit, onNext }: Pr
     return h;
   }, [spec, noise, bounce, patchControls]);
 
-  const { errors } = counts(issues);
   const f = fidelity ? FIDELITY[fidelity] : null;
+  const booting = !bench && !error;
+  const preset = FAULTS.find((x) => x.noise === noise && x.bounce === bounce)?.id;
 
   return (
     <div className="test">
       <section className="bench-col">
         <div className="bar">
-          <div>
-            <h1 className="h-sm">Virtual panel</h1>
-          </div>
-          {f && (
+          <h1 className="h-sm">Virtual panel</h1>
+          {f ? (
             <div className={`fidelity ${fidelity}`} title={f.line}>
               <span className="pulse" aria-hidden />
               <b>{f.name}</b>
             </div>
+          ) : (
+            booting && <div className="fidelity booting" role="status"><span className="pulse" aria-hidden /><b>Starting the emulator…</b></div>
           )}
         </div>
         {f && <p className="fid-line">{f.line}</p>}
-        {errors > 0 && <p className="callout warn">This design still has {errors} {errors === 1 ? 'problem' : 'problems'}. The simulator will try its best, but the real device may not behave like this. <button className="link" onClick={onBack}>Back to Design</button></p>}
-        {error && <p className="callout warn" role="alert">The simulator couldn’t start: {error}</p>}
+        <IssueBar issues={issues} spec={spec} onFix={onFix} />
+        {error && (
+          <div className="callout warn" role="alert">
+            <p>The emulator didn’t start.</p>
+            <div className="row-btns">
+              <button className="btn" onClick={() => setRetry((n) => n + 1)}>Try again</button>
+              {spec.mcu === 'rp2040-pico' && !forceModel && <button className="btn" onClick={() => setForceModel(true)}>Use the model instead</button>}
+            </div>
+            <details><summary>Details</summary><p className="mono">{error}</p></details>
+          </div>
+        )}
 
-        <Panel spec={spec} values={shown} leds={leds} onAnalog={onAnalog} onButton={onButton} onEncoder={onEncoder} onTouch={setSel} onFileDrop={spec.audio ? dropFile : undefined} />
-        <p className="tips">Drag knobs and faders up and down (hold Shift for fine control), click and hold pads, spin encoders with the scroll wheel or by dragging. With the keyboard: Tab to a control, then arrow keys.</p>
+        {!spec.audio && <SoundCheck spec={spec} bench={bench} designId={designId} autoStart={autoSound} />}
+        {spec.audio && (
+          <ListenCard spec={spec} bench={bench} rig={listen.rig} stats={stats} error={listen.error} onPower={listen.power} onPowerOff={listen.powerOff} busy={testing} part="bar" />
+        )}
+
+        <div className={`panel-host${booting ? ' booting' : ''}`} aria-busy={booting}>
+          <Panel spec={spec} values={shown} leds={leds} onAnalog={onAnalog} onButton={onButton} onEncoder={onEncoder} onTouch={setSel} onFileDrop={spec.audio ? dropFile : undefined} />
+        </div>
+        <p className="swipe-hint">Swipe the panel sideways to see every strip.</p>
+        <p className="tips">Drag knobs and faders up and down (Shift for fine control), hold pads down, spin encoders with the wheel. Keyboard: Tab to a control, then arrow keys.</p>
 
         {spec.audio ? (
-          <ListenCard spec={spec} bench={bench} rig={listen.rig} stats={stats} error={listen.error} onPower={listen.power} onPowerOff={listen.powerOff} busy={testing} />
+          <ListenCard spec={spec} bench={bench} rig={listen.rig} stats={stats} error={listen.error} onPower={listen.power} onPowerOff={listen.powerOff} busy={testing} part="body" />
         ) : (
           <DawCard bench={bench} spec={spec} log={hostLog} paused={testing} />
         )}
-        <AutoTest bench={bench} noise={noise} bounce={bounce} fidelity={fidelity} onRunning={setTesting} />
+        <AutoTest bench={bench} noise={noise} bounce={bounce} fidelity={fidelity} onRunning={setTesting} onResult={onResult} />
         {spec.audio && <AudioTest spec={spec} bench={bench} rig={listen.rig} onRunning={setTesting} disabled={testing} />}
 
         <section className="card imperfect">
           <header>
             <h2>Simulated faults</h2>
-            <p>Add noise and contact bounce to see how the design copes.</p>
           </header>
-          <div className="dials">
-            <Dial label="Pot noise" unit="counts" value={noise} max={64} onChange={setNoise} help="Random jitter on every reading of a knob or fader, on a 0–4095 scale. Cheap pots and long wires do this." />
-            <Dial label="Button bounce" unit="ms" value={bounce} max={30} onChange={setBounce} help="Metal contacts rattle for a moment on every press and release." />
-            <div className="dial">
-              <label htmlFor="seed">Random seed</label>
-              <div className="seed">
-                <NumInput id="seed" value={seed} min={0} max={99999} onChange={setSeed} />
-                <button className="btn ghost" onClick={() => setSeed(Math.floor(Math.random() * 99999))}>Roll</button>
-              </div>
-              <p className="help">Same seed, same “random” imperfections, so you can repeat a test.</p>
-            </div>
+          <div className="seg" role="group" aria-label="Fault preset">
+            {FAULTS.map((x) => (
+              <button key={x.id} type="button" aria-pressed={preset === x.id} onClick={() => (setNoise(x.noise), setBounce(x.bounce))}>{x.label}</button>
+            ))}
           </div>
+          <p className="help">{FAULTS.find((x) => x.id === preset)?.line ?? 'Custom settings.'} Faults make knobs jitter and switches double-trigger; the fixes appear below.</p>
           {hints.map((h) => (
             <div className="hint" key={h.action}>
               <p>{h.text}</p>
               <button className="btn" onClick={h.apply}>{h.action}</button>
             </div>
           ))}
+          <details className="fine">
+            <summary>Fine control</summary>
+            <div className="dials">
+              <Dial label="Pot noise" unit="counts" value={noise} max={64} onChange={setNoise} help="Random jitter on every reading of a knob or fader, on a 0–4095 scale." />
+              <Dial label="Button bounce" unit="ms" value={bounce} max={30} onChange={setBounce} help="Metal contacts rattle for a moment on every press and release." />
+              <div className="dial">
+                <label htmlFor="seed">Random seed</label>
+                <div className="seed">
+                  <NumInput id="seed" value={seed} min={0} max={99999} onChange={setSeed} />
+                  <button className="btn ghost" onClick={() => setSeed(Math.floor(Math.random() * 99999))}>Roll</button>
+                </div>
+                <p className="help">Same seed, same faults, so a test can be repeated.</p>
+              </div>
+            </div>
+          </details>
         </section>
-
-        <div className="next">
-          <button className="btn ghost" onClick={onBack}>Back to design</button>
-          <button className="btn primary big" onClick={onNext}>Parts and firmware</button>
-        </div>
       </section>
 
       <aside className="monitor-col">
@@ -342,7 +382,7 @@ function SendTo({ out }: { out: ReturnType<typeof useMidiOut> }) {
     out.mode === 'helper'
       ? out.helperUp
         ? { ok: true, text: 'Connected. Sending to the “kont.rolla” MIDI port.' }
-        : { ok: false, text: `Not connected to ${HELPER_URL}. Start it with: bun run --cwd apps/helper start` }
+        : { ok: false, text: 'The helper isn’t running on this computer.' }
       : out.mode === 'webmidi'
         ? out.webmidi === 'unsupported'
           ? { ok: false, text: 'This browser has no WebMIDI. Try Chrome, Edge or Brave.' }
@@ -355,9 +395,9 @@ function SendTo({ out }: { out: ReturnType<typeof useMidiOut> }) {
   return (
     <section className="card sendto" aria-label="Send to a real MIDI port">
       <h2>MIDI output</h2>
-      <p className="help">Optional. Forward the virtual device’s MIDI to your DAW or synth.</p>
+      <p className="help">Send this device’s MIDI to a DAW or synth on your computer.</p>
       <div className="seg" role="group" aria-label="Destination">
-        {([['off', 'Off'], ['webmidi', 'Browser MIDI'], ['helper', 'kont.rolla helper']] as const).map(([m, label]) => (
+        {([['off', 'Off'], ['webmidi', 'Browser MIDI'], ['helper', 'kont.rolla helper']] as const).filter(([m]) => m !== 'helper' || out.helperAvailable || out.mode === 'helper').map(([m, label]) => (
           <button key={m} type="button" aria-pressed={out.mode === m} onClick={() => out.setMode(m)}>{label}</button>
         ))}
       </div>

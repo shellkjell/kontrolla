@@ -1,20 +1,26 @@
 import { useEffect, useMemo, useState } from 'react';
 import { AUDIO_BOARDS, IO_MODULES, MCUS, PARTS, bom, buildSteps, exportUf2, generateTeensySketch } from '@kontrolla/core';
 import type { BomItem, DeviceSpec, Issue } from '@kontrolla/core';
-import { counts } from '../components/Issues';
+import { IssueBar, counts } from '../components/Issues';
+import { fitBoard } from '../components/layout/ops';
+import { GuideBench } from '../features/guide/GuideBench';
 import { PanelSvg } from '../features/PanelSvg';
-import { download, midiMap, midiMapCsv } from '../features/exports';
+import { bomCsv, bomText, download, midiMap, midiMapCsv } from '../features/exports';
 import { fetchFirmwareUf2 } from '../sim/firmware';
 import { slug } from '../store';
 
 interface Props {
-  spec: DeviceSpec;
+  spec: DeviceSpec; // allocated
+  /** The design as saved (no allocated pins): what an edit from here goes back into. */
+  source: DeviceSpec;
   issues: Issue[];
   /** Keys the saved checklist to this design. */
   designId: string;
-  onBack: () => void;
+  onFix: (controlId?: string) => void;
   onShare: () => void;
   onImport: () => void;
+  onChangeSpec: (s: DeviceSpec) => void;
+  notify: (text: string, opts?: { undo?: boolean }) => void;
 }
 
 const usd = (n: number) => `$${n.toFixed(2)}`;
@@ -52,7 +58,7 @@ function useChecks(id: string) {
   return { done, toggle: (k: string) => setDone((d) => (d.includes(k) ? d.filter((x) => x !== k) : [...d, k])), reset: () => setDone([]) };
 }
 
-export function Build({ spec, issues, designId, onBack, onShare, onImport }: Props) {
+export function Build({ spec, source, issues, designId, onFix, onShare, onImport, onChangeSpec, notify }: Props) {
   const { items, wiring, totalUsd } = useMemo(() => bom(spec), [spec]);
   const steps = useMemo(() => buildSteps(spec), [spec]);
   const map = useMemo(() => midiMap(spec), [spec]);
@@ -62,6 +68,19 @@ export function Build({ spec, issues, designId, onBack, onShare, onImport }: Pro
   const [err, setErr] = useState('');
   const checks = useChecks(designId);
   const ticked = steps.filter((s) => checks.done.includes(s.title)).length;
+  const [confirmBoard, setConfirmBoard] = useState(false);
+  const phone = typeof window !== 'undefined' && window.matchMedia('(max-width: 700px)').matches;
+  // the readiness strip in the header reads progress from here
+  useEffect(() => {
+    try {
+      localStorage.setItem(`kontrolla.buildtotal.${designId}`, String(steps.length));
+    } catch {
+      // not remembered
+    }
+    window.dispatchEvent(new Event('kontrolla-build'));
+  }, [designId, steps.length, checks.done]);
+  const goTo = (id: string) => document.getElementById(id)?.scrollIntoView({ behavior: matchMedia('(prefers-reduced-motion: reduce)').matches ? 'auto' : 'smooth', block: 'start' });
+  const proven = Object.values(AUDIO_BOARDS).find((b) => b.maturity === 'proven');
   const meters = spec.meters?.length ?? 0;
   const audio = spec.audio;
   const board = audio ? AUDIO_BOARDS[audio.board] : undefined;
@@ -71,6 +90,7 @@ export function Build({ spec, issues, designId, onBack, onShare, onImport }: Pro
     const ids = [...new Set([...(spec.ioSlots ?? []).map((x) => x.module), ...audio.master.outputs])].filter((id) => IO_MODULES[id]?.mount === 'slot');
     return ids.map((id) => ({ m: IO_MODULES[id]!, slots: [...(spec.ioSlots ?? []).filter((x) => x.module === id).map((x) => x.label ?? x.id), ...(audio.master.outputs.includes(id) ? ['Master out'] : [])] }));
   }, [audio, spec.ioSlots]);
+  const dropped = board && proven && audio ? audio.channels.slice(proven.stereoChannels).map((c) => c.label) : [];
   const experimentalModules = plates.filter((p) => p.m.maturity === 'experimental');
 
   const run = (fn: () => void | Promise<void>) => async () => {
@@ -103,17 +123,51 @@ export function Build({ spec, issues, designId, onBack, onShare, onImport }: Pro
         <p className="price" aria-label={`Estimated parts cost ${usd(totalUsd)}`}><b>≈ {usd(totalUsd)}</b> in parts, single-unit prices</p>
       </header>
 
-      {errors > 0 && <p className="callout warn">Firmware downloads unlock once the design check is clear ({errors} to fix). <button className="link" onClick={onBack}>Back to Design</button></p>}
+      {phone && (
+        <div className="callout" role="note">
+          Flashing a board needs a computer. You can read the guide here and send the design to yourself.
+          <div className="row-btns"><button className="btn" onClick={onShare}>Copy share link</button></div>
+        </div>
+      )}
+      <IssueBar issues={issues} spec={spec} onFix={onFix} />
+      <nav className="app-subnav" aria-label="On this page">
+        {[['files', 'Files'], ['guide', 'Build guide'], ['parts', 'Parts'], ['wiring', 'Wiring'], ['map', 'MIDI map']].map(([id, label]) => (
+          <button key={id} onClick={() => goTo(id!)}>{label}</button>
+        ))}
+        <span className="grow" />
+        <span className="mono">{ticked}/{steps.length} steps</span>
+      </nav>
       {err && <p className="callout warn" role="alert">{err}</p>}
       {board?.maturity === 'experimental' && (
         <div className="callout danger" role="note">
           <b>{board.name} is unproven.</b> {board.maturityNote} 
           {board.sources[0] && <a href={board.sources[0]} target="_blank" rel="noreferrer">The PJRC forum thread ↗</a>}{' '}
-          A proven 3-channel mixer on one codec is on the Start page.
+          {dropped.length > 0 && proven && (
+            <div className="row-btns">
+              {!confirmBoard ? (
+                <button className="btn" onClick={() => setConfirmBoard(true)}>Switch to the proven {proven.stereoChannels}-channel board</button>
+              ) : (
+                <>
+                  <span>This removes {dropped.join(', ')} and their rear plates.</span>
+                  <button
+                    className="btn primary"
+                    onClick={() => {
+                      onChangeSpec(fitBoard(source, proven.id));
+                      setConfirmBoard(false);
+                      notify(`Switched to ${proven.name}. Removed ${dropped.join(', ')}.`, { undo: true });
+                    }}
+                  >
+                    Switch and remove them
+                  </button>
+                  <button className="btn ghost" onClick={() => setConfirmBoard(false)}>Cancel</button>
+                </>
+              )}
+            </div>
+          )}
         </div>
       )}
 
-      <div className="downloads">
+      <div className="downloads" id="files">
         <div className="card dl">
           <h2>{pico ? 'Firmware (.uf2)' : 'Sketch (.ino)'}</h2>
           <p>{pico ? 'One file with the generic firmware and your design baked in. Drag it onto the Pico in BOOTSEL mode.' : 'Arduino code generated from your design.'}</p>
@@ -192,32 +246,17 @@ export function Build({ spec, issues, designId, onBack, onShare, onImport }: Pro
         </section>
       )}
 
-      <section aria-labelledby="guide-h">
+      <section aria-labelledby="guide-h" id="guide">
         <h2 className="sec" id="guide-h">Build guide</h2>
-        <div className="progress guide" role="progressbar" aria-label="Build progress" aria-valuemin={0} aria-valuemax={steps.length} aria-valuenow={ticked}>
-          <span style={{ width: `${(ticked / steps.length) * 100}%` }} />
-          <small>{ticked} of {steps.length} steps done</small>
-        </div>
-        <ol className="guide-steps">
-          {steps.map((s, i) => {
-            const on = checks.done.includes(s.title);
-            return (
-              <li key={s.title} className={on ? 'done' : ''}>
-                <label>
-                  <input type="checkbox" checked={on} onChange={() => checks.toggle(s.title)} />
-                  <span className="n">{i + 1}</span>
-                  <span className="t">{s.title}</span>
-                </label>
-                <ul>{s.details.map((d) => <li key={d}>{d}</li>)}</ul>
-              </li>
-            );
-          })}
-        </ol>
-        {ticked > 0 && <button className="link" onClick={checks.reset}>Clear all ticks</button>}
+        <GuideBench spec={spec} steps={steps} done={checks.done} toggle={checks.toggle} reset={checks.reset} designId={designId} />
       </section>
 
-      <section>
+      <section id="parts">
         <h2 className="sec">Parts list</h2>
+        <div className="row-btns no-print">
+          <button className="btn" onClick={() => download(`${file}-parts.csv`, bomCsv(items), 'text/csv')}>Download parts (.csv)</button>
+          <button className="btn" onClick={() => navigator.clipboard.writeText(bomText(items)).then(() => notify('Parts list copied.'), () => notify('Your browser wouldn’t copy it. Use the .csv instead.'))}>Copy list</button>
+        </div>
         <div className="tablewrap">
           <table className="parts">
             <thead><tr><th>Qty</th><th>Part</th><th>Notes</th><th className="num">Each</th><th className="num">Total</th></tr></thead>
@@ -254,8 +293,10 @@ export function Build({ spec, issues, designId, onBack, onShare, onImport }: Pro
         <p className="help">Prices are rough single-unit figures to size the project, before shipping and tax. The shop links search by part number.</p>
       </section>
 
-      <section>
+      <section id="wiring">
         <h2 className="sec">Wiring</h2>
+        <details className="wiring-ref">
+          <summary>Show every connection ({wiring.length} rows)</summary>
         <div className="tablewrap">
           <table>
             <thead><tr><th>Control</th><th>Connections</th></tr></thead>
@@ -272,10 +313,11 @@ export function Build({ spec, issues, designId, onBack, onShare, onImport }: Pro
             </tbody>
           </table>
         </div>
+        </details>
         <p className="help">The emulator can’t catch noise from long wires, ground loops or a weak USB port. If something misbehaves on the bench, shorten wires first.</p>
       </section>
 
-      <section className="printable" aria-labelledby="map-h">
+      <section className="printable" aria-labelledby="map-h" id="map">
         <h2 className="sec" id="map-h">MIDI map and panel overlay</h2>
         <p className="help">A one-page reference for next to your DAW: what every control sends, and a top view with names and numbers at each hole. Print it, or save it as a PDF.</p>
         <button className="btn no-print" onClick={printMap}>Print the MIDI map</button>
@@ -297,7 +339,6 @@ export function Build({ spec, issues, designId, onBack, onShare, onImport }: Pro
         </div>
       </section>
 
-      <div className="next"><button className="btn ghost" onClick={onBack}>Back to design</button></div>
     </div>
   );
 }

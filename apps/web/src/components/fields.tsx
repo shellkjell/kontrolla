@@ -15,7 +15,7 @@ export function Field({ label, help, children, wide }: { label: string; help?: R
 }
 
 /** Integer input that lets you clear and retype; commits only valid values, snaps back on blur. */
-export function NumInput({ id, value, min, max, onChange }: { id?: string; value: number; min: number; max: number; onChange: (n: number) => void }) {
+export function NumInput({ id, value, min, max, onChange, label }: { id?: string; value: number; min: number; max: number; onChange: (n: number) => void; /** Accessible name when there is no <label htmlFor> for it. */ label?: string }) {
   const [draft, setDraft] = useState(String(value));
   useEffect(() => {
     setDraft(String(value));
@@ -23,6 +23,7 @@ export function NumInput({ id, value, min, max, onChange }: { id?: string; value
   return (
     <input
       id={id}
+      aria-label={label}
       className="num"
       inputMode="numeric"
       value={draft}
@@ -47,5 +48,14 @@ export function Tune({ id, value, max, onChange }: { id: string; value: number; 
       <input id={id} type="range" min={0} max={max} value={value} onChange={(e) => onChange(Number(e.target.value))} style={{ '--p': `${(value / max) * 100}%` } as React.CSSProperties} />
       <NumInput value={value} min={0} max={max} onChange={onChange} />
     </div>
+  );
+}
+
+/** A word with a one-sentence meaning on hover or focus. Plain wording first, the term second. */
+export function Term({ children, means }: { children: ReactNode; means: string }) {
+  return (
+    <abbr className="term" title={means} tabIndex={0}>
+      {children}
+    </abbr>
   );
 }

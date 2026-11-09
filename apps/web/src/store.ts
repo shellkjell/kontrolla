@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useState } from 'react';
+import { useCallback, useEffect, useRef, useState } from 'react';
 import type { Control, DeviceSpec, McuId } from '@kontrolla/core';
 
 export type Step = 'start' | 'design' | 'test' | 'build';
@@ -10,7 +10,7 @@ export interface Saved {
 }
 
 const KEY = 'kontrolla.design.v1';
-const newId = (): string => Math.random().toString(36).slice(2, 10);
+export const newId = (): string => Math.random().toString(36).slice(2, 10);
 
 export function load(): Saved {
   try {
@@ -22,13 +22,57 @@ export function load(): Saved {
   return { spec: null, step: 'start', id: newId() };
 }
 
-export const save = (s: Saved): void => {
+/** false when the browser would not keep it (private mode, quota): the design only lives until the tab closes. */
+export const save = (s: Saved): boolean => {
   try {
     localStorage.setItem(KEY, JSON.stringify(s));
+    return true;
   } catch {
-    // private mode / quota: the design just won't survive a reload
+    return false;
   }
 };
+
+// ---- recent designs: every design that gets replaced is kept (newest first), so nothing is lost to a template click ----
+export interface Recent {
+  id: string;
+  name: string;
+  savedAt: number;
+  spec: DeviceSpec;
+}
+const RECENT_KEY = 'kontrolla.recent.v1';
+const RECENT_MAX = 8;
+
+export function loadRecent(): Recent[] {
+  try {
+    const r = JSON.parse(localStorage.getItem(RECENT_KEY) ?? '[]') as Recent[];
+    return Array.isArray(r) ? r.filter((x) => x?.spec?.version === 1 && Array.isArray(x.spec.controls)) : [];
+  } catch {
+    return [];
+  }
+}
+const saveRecent = (r: Recent[]): void => {
+  // a full storage drops the oldest entries first rather than failing outright
+  for (let keep = r.length; keep >= 0; keep--) {
+    try {
+      localStorage.setItem(RECENT_KEY, JSON.stringify(r.slice(0, keep)));
+      return;
+    } catch {
+      // try again with fewer
+    }
+  }
+};
+/** Put a design at the top of the recent list. Designs with nothing in them are not worth keeping. */
+export function remember(spec: DeviceSpec, id: string): Recent[] {
+  if (!spec.controls.length && !spec.meters?.length) return loadRecent();
+  const next = [{ id, name: spec.name, savedAt: Date.now(), spec }, ...loadRecent().filter((x) => x.id !== id)].slice(0, RECENT_MAX);
+  saveRecent(next);
+  return next;
+}
+export function forget(id: string): Recent[] {
+  const next = loadRecent().filter((x) => x.id !== id);
+  saveRecent(next);
+  return next;
+}
 
 interface Snapshot {
   spec: DeviceSpec;
@@ -51,7 +95,16 @@ const snap = (s: Saved): Snapshot[] => (s.spec ? [{ spec: s.spec, id: s.id }] : 
  */
 export function useDesign() {
   const [h, setH] = useState<Hist>(() => ({ saved: load(), past: [], future: [], at: 0 }));
-  useEffect(() => save(h.saved), [h.saved]);
+  const [recent, setRecent] = useState<Recent[]>(loadRecent);
+  const [savedAt, setSavedAt] = useState<number | null>(null);
+  const [saveFailed, setSaveFailed] = useState(false);
+  const now = useRef(h.saved);
+  now.current = h.saved;
+  useEffect(() => {
+    const ok = save(h.saved);
+    setSaveFailed(!ok);
+    if (ok) setSavedAt(Date.now());
+  }, [h.saved]);
 
   const update = useCallback(
     (fn: (spec: DeviceSpec) => DeviceSpec) =>
@@ -70,10 +123,14 @@ export function useDesign() {
   const patchControls = useCallback((fn: (c: Control) => Control) => update((s) => ({ ...s, controls: s.controls.map(fn) })), [update]);
   const go = useCallback((step: Step) => setH((p) => ({ ...p, saved: { ...p.saved, step } })), []);
   const replace = useCallback(
-    (spec: DeviceSpec, step: Step = 'design') =>
-      setH((p) => ({ saved: { spec, step, id: newId() }, past: [...p.past, ...snap(p.saved)].slice(-LIMIT), future: [], at: 0 })),
+    (spec: DeviceSpec, step: Step = 'design', id = newId()) => {
+      // the design being replaced is kept under "recent designs" before anything else happens
+      if (now.current.spec) setRecent(remember(now.current.spec, now.current.id));
+      setH((p) => ({ saved: { spec, step, id }, past: [...p.past, ...snap(p.saved)].slice(-LIMIT), future: [], at: 0 }));
+    },
     [],
   );
+  const dropRecent = useCallback((id: string) => setRecent(forget(id)), []);
   const undo = useCallback(
     () =>
       setH((p) => {
@@ -90,7 +147,7 @@ export function useDesign() {
       }),
     [],
   );
-  return { saved: h.saved, setSpec, patchControls, go, replace, undo, redo, canUndo: h.past.length > 0, canRedo: h.future.length > 0 };
+  return { saved: h.saved, setSpec, patchControls, go, replace, undo, redo, canUndo: h.past.length > 0, canRedo: h.future.length > 0, recent, dropRecent, savedAt, saveFailed };
 }
 
 export const blank = (mcu: McuId): DeviceSpec => ({

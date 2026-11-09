@@ -10,12 +10,13 @@ const KIND_COLOR = { pot: '#c4c8cc', encoder: '#c4c8cc', fader: '#8c9298', butto
  * Top view of the panel, 1 user unit = 1 mm. `thumb`: small card picture. `overlay`: labelled, for printing as a silkscreen
  * / sticker guide (names and MIDI numbers beside every hole).
  */
-export function PanelSvg({ spec, variant, mm }: { spec: DeviceSpec; variant: 'thumb' | 'overlay'; mm?: boolean }) {
+export function PanelSvg({ spec, variant, mm, highlight }: { spec: DeviceSpec; variant: 'thumb' | 'overlay' | 'bench'; mm?: boolean; highlight?: ReadonlySet<string> }) {
   const laid = useMemo(() => ensureLayout(spec), [spec]);
   const lay = laid.layout!;
   const { width: W, depth: D, cornerRadius: r } = lay.panel;
   const kindOf = (id: string) => (laid.meters?.some((m) => m.id === id) ? 'meter' : (laid.controls.find((c) => c.id === id)?.kind ?? 'pot'));
-  const thumb = variant === 'thumb';
+  const thumb = variant !== 'overlay';
+  const dim = (id: string) => !!highlight?.size && !highlight.has(id);
   const text = (id: string) => {
     const c = laid.controls.find((x) => x.id === id);
     if (c) return c.midi.type === 'cc' ? `CC${c.midi.cc}` : noteName(c.midi.note);
@@ -39,8 +40,8 @@ export function PanelSvg({ spec, variant, mm }: { spec: DeviceSpec; variant: 'th
         if (!b) return null;
         const col = g.color ?? '#8b8470';
         return (
-          <g key={g.id}>
-            <rect x={b.x} y={b.y} width={b.w} height={b.h} rx={2} fill={thumb ? col : 'none'} fillOpacity={0.14} stroke={col} strokeWidth={thumb ? 1.2 : 0.3} strokeDasharray={thumb ? undefined : '2 1'} />
+          <g key={g.id} opacity={dim(g.id) && !g.members.some((m) => highlight?.has(m)) ? 0.35 : 1}>
+            <rect x={b.x} y={b.y} width={b.w} height={b.h} rx={2} fill={thumb ? col : 'none'} fillOpacity={highlight?.has(g.id) ? 0.34 : 0.14} stroke={col} strokeWidth={thumb ? 1.2 : 0.3} strokeDasharray={thumb ? undefined : '2 1'} />
             {!thumb && <text x={b.x + 1} y={b.y - 1} fontSize={3.2} fill={col} fontWeight={600}>{g.label}</text>}
           </g>
         );
@@ -57,7 +58,7 @@ export function PanelSvg({ spec, variant, mm }: { spec: DeviceSpec; variant: 'th
             <rect x={c.x - hw} y={c.y - hh} width={2 * hw} height={2 * hh} rx={c.shape === 'slot' ? Math.min(hw, hh) : 0.6} />
           );
         return (
-          <g key={c.id} className="hole" fill={thumb ? col : 'none'} stroke={thumb ? 'none' : '#000'} strokeWidth={0.25}>
+          <g key={c.id} className="hole" opacity={dim(c.id) ? 0.22 : 1} fill={thumb ? col : 'none'} stroke={thumb ? 'none' : '#000'} strokeWidth={0.25}>
             {shape}
             {!thumb && k !== 'meter' && (c.shape === 'circle' && hw >= 6 ? (
               // big round caps (buttons): the name sits inside the hole, the number under it
