@@ -1,6 +1,6 @@
 import { useEffect, useMemo, useState } from 'react';
-import { MCUS, PARTS, bom, buildSteps, exportUf2, generateTeensySketch } from '@kontrolla/core';
-import type { DeviceSpec, Issue } from '@kontrolla/core';
+import { AUDIO_BOARDS, IO_MODULES, MCUS, PARTS, bom, buildSteps, exportUf2, generateTeensySketch } from '@kontrolla/core';
+import type { BomItem, DeviceSpec, Issue } from '@kontrolla/core';
 import { counts } from '../components/Issues';
 import { PanelSvg } from '../features/PanelSvg';
 import { download, midiMap, midiMapCsv } from '../features/exports';
@@ -18,6 +18,19 @@ interface Props {
 }
 
 const usd = (n: number) => `$${n.toFixed(2)}`;
+const SECTION_ORDER = ['Controller'];
+
+/** Parts grouped the way you will build them: the controller first, then the audio engine, power and one block per module. */
+function sections(items: BomItem[]) {
+  const by = new Map<string, BomItem[]>();
+  for (const i of items) by.set(i.section ?? 'Controller', [...(by.get(i.section ?? 'Controller') ?? []), i]);
+  return [...by].sort(([a], [b]) => (SECTION_ORDER.includes(a) ? 0 : 1) - (SECTION_ORDER.includes(b) ? 0 : 1)).map(([name, rows]) => ({
+    name,
+    rows,
+    total: Math.round(rows.reduce((n, r) => n + r.totalUsd, 0) * 100) / 100,
+    experimental: rows.some((r) => r.maturity === 'experimental'),
+  }));
+}
 const KEY = (id: string) => `kontrolla.checks.${id}`;
 
 /** Ticked build steps, remembered per design. */
@@ -50,6 +63,15 @@ export function Build({ spec, issues, designId, onBack, onShare, onImport }: Pro
   const checks = useChecks(designId);
   const ticked = steps.filter((s) => checks.done.includes(s.title)).length;
   const meters = spec.meters?.length ?? 0;
+  const audio = spec.audio;
+  const board = audio ? AUDIO_BOARDS[audio.board] : undefined;
+  const parts = useMemo(() => sections(items), [items]);
+  const plates = useMemo(() => {
+    if (!audio) return [];
+    const ids = [...new Set([...(spec.ioSlots ?? []).map((x) => x.module), ...audio.master.outputs])].filter((id) => IO_MODULES[id]?.mount === 'slot');
+    return ids.map((id) => ({ m: IO_MODULES[id]!, slots: [...(spec.ioSlots ?? []).filter((x) => x.module === id).map((x) => x.label ?? x.id), ...(audio.master.outputs.includes(id) ? ['Master out'] : [])] }));
+  }, [audio, spec.ioSlots]);
+  const experimentalModules = plates.filter((p) => p.m.maturity === 'experimental');
 
   const run = (fn: () => void | Promise<void>) => async () => {
     setErr('');
@@ -84,6 +106,13 @@ export function Build({ spec, issues, designId, onBack, onShare, onImport }: Pro
 
       {errors > 0 && <p className="callout warn">Firmware downloads unlock once the design check is clear ({errors} to fix). <button className="link" onClick={onBack}>Back to Design</button></p>}
       {err && <p className="callout warn" role="alert">{err}</p>}
+      {board?.maturity === 'experimental' && (
+        <div className="callout danger" role="note">
+          <b>{board.name} is unproven.</b> {board.maturityNote} 
+          {board.sources[0] && <a href={board.sources[0]} target="_blank" rel="noreferrer">The PJRC forum thread ↗</a>}
+          A proven 3-channel mixer on one codec is on the Start page.
+        </div>
+      )}
 
       <div className="downloads">
         <div className="card dl">
@@ -129,6 +158,41 @@ export function Build({ spec, issues, designId, onBack, onShare, onImport }: Pro
         </div>
       </div>
 
+      {audio && (
+        <section aria-labelledby="audio-h" className="audio-build">
+          <h2 className="sec" id="audio-h">Audio</h2>
+          <p className="help">
+            The surface above is a USB MIDI controller. The audio side is a Teensy 4.1 with {board?.codecs === 2 ? 'two CS42448 codecs' : 'a CS42448 codec'} that does the mixing; the surface talks to it over the MIDI port. Each channel’s input is a small plate in a rear slot, so changing a channel from RCA to XLR means fitting a different plate.
+          </p>
+          <div className="downloads">
+            <div className="card dl">
+              <h2>Engine sketch (.ino)</h2>
+              <p>The Teensy Audio Library code for the mixing engine: gain, four-band EQ, filter, pan, FX, mute, solo, cue, fader, master, meters back to the surface.</p>
+              <p className="warnline"><span className="tag exp">untested</span> Not compiled and never run on hardware. Treat it as a starting point and test it on a breadboard.</p>
+              <button className="btn" onClick={run(async () => download(`${file}-engine.ino`, (await import('@kontrolla/audio')).generateEngineSketch(spec), 'text/plain'))}>Download .ino</button>
+            </div>
+            <div className="card dl slots">
+              <h2>Swappable input plates</h2>
+              <p>
+                Standard: a <b>32 × 66 mm</b> opening in the rear wall per slot, a <b>32 × 80 × 2 mm</b> plate held by two <b>M3</b> screws, <b>24 mm</b> round cut-outs for the D-size connectors, and a <b>2 × 8 IDC</b> header that carries ±12 V, 5 V, 48 V phantom, A/B select and the audio pair. A resistor on the plate tells the engine which module it is. <b>Power down before swapping</b>: the header is not hot-swap safe.
+              </p>
+              <ul className="plates">
+                {plates.map(({ m, slots }) => (
+                  <li key={m.id}>
+                    <div>
+                      <b>{m.name}</b>
+                      <small>{slots.join(', ')} · {m.connectors.length} connector{m.connectors.length === 1 ? '' : 's'}{m.maturity === 'experimental' ? ' · front end is a candidate' : ''}</small>
+                    </div>
+                    <button className="btn" onClick={run(async () => download(`${m.id}-plate.stl`, (await enclosure()).exportModulePlateStl(m.id) as Uint8Array<ArrayBuffer>))}>Plate .stl</button>
+                  </li>
+                ))}
+              </ul>
+              {experimentalModules.length > 0 && <p className="help">The connectors on these plates are real parts, but the circuits behind them are candidates nobody has built here. The parts list marks each one.</p>}
+            </div>
+          </div>
+        </section>
+      )}
+
       <section aria-labelledby="guide-h">
         <h2 className="sec" id="guide-h">Build guide</h2>
         <div className="progress guide" role="progressbar" aria-label="Build progress" aria-valuemin={0} aria-valuemax={steps.length} aria-valuenow={ticked}>
@@ -158,24 +222,33 @@ export function Build({ spec, issues, designId, onBack, onShare, onImport }: Pro
         <div className="tablewrap">
           <table className="parts">
             <thead><tr><th>Qty</th><th>Part</th><th>Notes</th><th className="num">Each</th><th className="num">Total</th></tr></thead>
-            <tbody>
-              {items.map((i) => (
-                <tr key={i.part}>
-                  <td className="qty">{i.qty}</td>
-                  <td>
-                    <b>{i.partNumber}</b>
-                    <span className="links">
-                      {link(i.part) && <a href={link(i.part)} target="_blank" rel="noreferrer">datasheet ↗</a>}
-                      {i.links && <a href={i.links.mouser} target="_blank" rel="noreferrer">Mouser ↗</a>}
-                      {i.links && <a href={i.links.digikey} target="_blank" rel="noreferrer">DigiKey ↗</a>}
-                    </span>
-                  </td>
-                  <td className="note">{i.notes}</td>
-                  <td className="num">{i.unitUsd ? usd(i.unitUsd) : '—'}</td>
-                  <td className="num">{i.totalUsd ? usd(i.totalUsd) : '—'}</td>
-                </tr>
-              ))}
-            </tbody>
+            {parts.map((g) => (
+              <tbody key={g.name}>
+                {(parts.length > 1) && (
+                  <tr className="grouprow">
+                    <th colSpan={4}>{g.name}{g.experimental && <span className="tag exp">has candidate parts</span>}</th>
+                    <th className="num">{usd(g.total)}</th>
+                  </tr>
+                )}
+                {g.rows.map((i) => (
+                  <tr key={g.name + i.part + i.partNumber}>
+                    <td className="qty">{i.qty}</td>
+                    <td>
+                      <b>{i.partNumber}</b>
+                      {i.maturity === 'experimental' && <span className="tag exp" title="A candidate or unverified part: check it before you buy">candidate</span>}
+                      <span className="links">
+                        {link(i.part) && <a href={link(i.part)} target="_blank" rel="noreferrer">datasheet ↗</a>}
+                        {i.links && <a href={i.links.mouser} target="_blank" rel="noreferrer">Mouser ↗</a>}
+                        {i.links && <a href={i.links.digikey} target="_blank" rel="noreferrer">DigiKey ↗</a>}
+                      </span>
+                    </td>
+                    <td className="note">{i.notes}</td>
+                    <td className="num">{i.unitUsd ? usd(i.unitUsd) : '—'}</td>
+                    <td className="num">{i.totalUsd ? usd(i.totalUsd) : '—'}</td>
+                  </tr>
+                ))}
+              </tbody>
+            ))}
             <tfoot><tr><td colSpan={4}>Estimated total</td><td className="num"><b>{usd(totalUsd)}</b></td></tr></tfoot>
           </table>
         </div>

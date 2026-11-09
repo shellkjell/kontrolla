@@ -16,6 +16,8 @@ export interface PanelProps {
   onEncoder: (id: string, detents: number) => void;
   /** Called when a control is touched or focused (for the inspector). */
   onTouch?: (id: string) => void;
+  /** An audio file was dropped on a group (a channel strip). Only offered when set. */
+  onFileDrop?: (groupId: string, file: File) => void;
 }
 
 const MAX_S = 4.2; // px per mm
@@ -33,7 +35,8 @@ function capOf(part: string): { w: number; h: number; round: boolean } | undefin
 type Phys = { s: number; rot: number };
 
 /** The front plate. Laid out in mm from spec.layout when there is one, in a plain grid when there isn't. Knows nothing about the simulator. */
-export const Panel = memo(function Panel({ spec, values, leds, onAnalog, onButton, onEncoder, onTouch }: PanelProps) {
+export const Panel = memo(function Panel({ spec, values, leds, onAnalog, onButton, onEncoder, onTouch, onFileDrop }: PanelProps) {
+  const [dropAt, setDropAt] = useState<string | null>(null);
   const laid = useMemo(() => {
     if (!spec.layout) return null;
     const ids = [...spec.controls, ...(spec.meters ?? [])].filter((x) => fpOf(x.part)).map((x) => x.id);
@@ -93,6 +96,16 @@ export const Panel = memo(function Panel({ spec, values, leds, onAnalog, onButto
   const lay = laid.layout!;
   const { width: W, depth: D } = lay.panel;
   const s = clamp(avail / W, MIN_S, MAX_S);
+  /** The group under a drag, by position on the deck. */
+  const groupAt = (e: React.DragEvent<HTMLElement>) => {
+    const r = e.currentTarget.getBoundingClientRect();
+    const x = (e.clientX - r.left) / s;
+    const y = (e.clientY - r.top) / s;
+    return (laid.groups ?? []).find((g) => {
+      const b = groupBBox(laid, g.id, GROUP_PAD);
+      return b && g.kind === 'strip' && x >= b.x && x <= b.x + b.w && y >= b.y && y <= b.y + b.h;
+    })?.id;
+  };
   const font = clamp(s * 2.4, 8.5, 11);
   const placed = (id: string) => lay.placements[id];
   const loose = laid.controls.filter((c) => !placed(c.id));
@@ -101,12 +114,18 @@ export const Panel = memo(function Panel({ spec, values, leds, onAnalog, onButto
     <div className="plate phys">
       {head}
       <div className="deck-wrap" ref={wrap}>
-        <div className="deck" style={{ width: W * s, height: D * s, borderRadius: lay.panel.cornerRadius * s, '--s': `${s}px`, '--font': `${font}px` } as CSSProperties}>
+        <div
+          className="deck"
+          style={{ width: W * s, height: D * s, borderRadius: lay.panel.cornerRadius * s, '--s': `${s}px`, '--font': `${font}px` } as CSSProperties}
+          onDragOver={onFileDrop ? (e) => { const g = e.dataTransfer.types.includes('Files') ? groupAt(e) : undefined; if (g) (e.preventDefault(), setDropAt(g)); else setDropAt(null); } : undefined}
+          onDragLeave={onFileDrop ? () => setDropAt(null) : undefined}
+          onDrop={onFileDrop ? (e) => { const g = groupAt(e); setDropAt(null); const f = e.dataTransfer.files[0]; if (g && f) (e.preventDefault(), e.stopPropagation(), onFileDrop(g, f)); } : undefined}
+        >
           {(laid.groups ?? []).map((g) => {
             const b = groupBBox(laid, g.id, GROUP_PAD);
             if (!b) return null;
             return (
-              <div key={g.id} className={`gframe ${g.kind ?? ''}`} style={{ left: b.x * s, top: b.y * s, width: b.w * s, height: b.h * s, '--g': g.color ?? '#8b8470' } as CSSProperties}>
+              <div key={g.id} className={`gframe ${g.kind ?? ''}${dropAt === g.id ? ' drop' : ''}`} style={{ left: b.x * s, top: b.y * s, width: b.w * s, height: b.h * s, '--g': g.color ?? '#8b8470' } as CSSProperties}>
                 <span>{g.label}</span>
               </div>
             );

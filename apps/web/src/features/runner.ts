@@ -29,7 +29,7 @@ export interface RunOptions {
   aborted: () => boolean;
 }
 
-const sleep = (ms: number) => new Promise<void>((r) => setTimeout(r, ms));
+export const sleep = (ms: number) => new Promise<void>((r) => setTimeout(r, ms));
 /** Polls until pred() holds or the time runs out. */
 async function until(pred: () => boolean, ms: number): Promise<boolean> {
   const end = performance.now() + ms;
@@ -47,8 +47,8 @@ const pText = (p: Parsed) => (p.type === 'cc' ? `CC ${p.num}` : noteName(p.num))
 /** LED colour as it comes out of the chain: each channel (c * brightness) >> 8. */
 const scaled = (hex: string, brightness: number) =>
   [1, 3, 5].map((i) => (Math.round(parseInt(hex.slice(i, i + 2), 16) * 1) * brightness) >> 8);
-const pixel = (f: Uint8Array | null, i: number) => (f ? [f[i * 3] ?? 0, f[i * 3 + 1] ?? 0, f[i * 3 + 2] ?? 0] : null);
-const lit = (f: Uint8Array | null, i: number, hex: string, brightness: number): boolean | null => {
+export const pixel = (f: Uint8Array | null, i: number) => (f ? [f[i * 3] ?? 0, f[i * 3 + 1] ?? 0, f[i * 3 + 2] ?? 0] : null);
+export const lit = (f: Uint8Array | null, i: number, hex: string, brightness: number): boolean | null => {
   const px = pixel(f, i);
   const on = scaled(hex, brightness);
   if (!px || Math.max(...on) < 2) return null; // too dim to tell on from off

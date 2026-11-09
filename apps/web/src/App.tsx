@@ -104,11 +104,18 @@ export function App() {
   const clearHash = () => history.replaceState(null, '', location.pathname + location.search);
 
   useEffect(() => {
-    const files = (e: DragEvent) => e.dataTransfer?.types.includes('Files');
+    // audio files belong to the channel strips on the Test page, not to the design importer
+    const audio = (e: DragEvent) => /^audio\//.test(e.dataTransfer?.items?.[0]?.type ?? '') || /\.(wav|mp3|ogg|flac|m4a|aac)$/i.test(e.dataTransfer?.files?.[0]?.name ?? '');
+    const files = (e: DragEvent) => e.dataTransfer?.types.includes('Files') && !audio(e);
     let depth = 0;
     const on = (e: DragEvent) => files(e) && (e.preventDefault(), e.type === 'dragenter' && (depth++, setDropping(true)));
     const leave = (e: DragEvent) => files(e) && --depth <= 0 && ((depth = 0), setDropping(false));
     const drop = (e: DragEvent) => {
+      if (e.dataTransfer?.types.includes('Files') && audio(e)) {
+        e.preventDefault();
+        setNotice({ text: 'Drop audio files on a channel strip on the Test page (power the mixer on first).' });
+        return;
+      }
       if (!files(e)) return;
       e.preventDefault();
       depth = 0;

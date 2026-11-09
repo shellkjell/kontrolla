@@ -14,6 +14,10 @@ import { DawCard } from '../features/DawCard';
 import { Inspector } from '../features/Inspector';
 import { keyOf, parse } from '../features/bench';
 import type { Bench } from '../features/bench';
+import { AudioTest } from '../features/listen/AudioTest';
+import { ListenCard } from '../features/listen/ListenCard';
+import { audioDefaults } from '../features/listen/defaults';
+import { useListen, useStats } from '../features/listen/useListen';
 
 interface Props {
   spec: DeviceSpec; // allocated
@@ -56,6 +60,11 @@ export function Test({ spec, issues, patchControls, onBack, onEdit, onNext }: Pr
   const [sel, setSel] = useState<string | undefined>();
   const [testing, setTesting] = useState(false);
   const out = useMidiOut();
+  // an audio mixer starts with gain, faders, EQ and pan where a mixer would have them, not at half travel
+  const init = useMemo(() => audioDefaults(spec), [spec]);
+  const initRef = useRef(init);
+  initRef.current = init;
+  const shown = useMemo(() => ({ ...init, ...values }), [init, values]);
   const sim = useRef<AppSim | null>(null);
   const valuesRef = useRef(values);
   valuesRef.current = values;
@@ -68,6 +77,17 @@ export function Test({ spec, issues, patchControls, onBack, onEdit, onNext }: Pr
   specRef.current = spec;
   const moveRef = useRef<(id: string, v: number) => void>(() => {});
   const wiring = useMemo(() => bom(spec).wiring, [spec]);
+  const listen = useListen(spec, bench);
+  const stats = useStats(listen.rig);
+  const dropFile = useCallback(
+    (groupId: string, file: File) => {
+      const r = listen.rig;
+      const i = r?.channels().findIndex((c) => c.id === groupId) ?? -1;
+      if (!r || i < 0) return listen.setError('Power on the mixer first, then drop the file on a channel strip.');
+      r.setSourceFile(i, r.channels()[i]!.active, file).catch((e) => listen.setError(e instanceof Error ? e.message : String(e)));
+    },
+    [listen],
+  );
 
   // Messages the pretend DAW sends show up in the monitor too, marked as coming from the DAW.
   const hostLog = useCallback((msg: number[]) => {
@@ -106,7 +126,7 @@ export function Test({ spec, issues, patchControls, onBack, onEdit, onNext }: Pr
       entries.length = 0;
       sim.current = s;
       setFidelity(s.fidelity);
-      for (const c of spec.controls) if (c.kind === 'pot' || c.kind === 'fader') s.setAnalog(c.id, valuesRef.current[c.id] ?? 0.5);
+      for (const c of spec.controls) if (c.kind === 'pot' || c.kind === 'fader') s.setAnalog(c.id, valuesRef.current[c.id] ?? initRef.current[c.id] ?? 0.5);
       unsub = s.onMidi((msg, t) => {
         entries.unshift({ n: counter.current++, t, ...decode(msg, specRef.current) });
         entries.length = Math.min(entries.length, MAX_LOG);
@@ -124,7 +144,7 @@ export function Test({ spec, issues, patchControls, onBack, onEdit, onNext }: Pr
         seen,
         onDevice: (cb) => (subs.add(cb), () => void subs.delete(cb)),
         frame: () => frame,
-        value: (id) => valuesRef.current[id] ?? 0.5,
+        value: (id) => valuesRef.current[id] ?? initRef.current[id] ?? 0.5,
         setAnalog: (id, x) => moveRef.current(id, x),
       });
       mark('Simulator started');
@@ -222,11 +242,16 @@ export function Test({ spec, issues, patchControls, onBack, onEdit, onNext }: Pr
         {errors > 0 && <p className="callout warn">This design still has {errors} {errors === 1 ? 'problem' : 'problems'}. The simulator will try its best, but the real device may not behave like this. <button className="link" onClick={onBack}>Back to Design</button></p>}
         {error && <p className="callout warn" role="alert">The simulator couldn’t start: {error}</p>}
 
-        <Panel spec={spec} values={values} leds={leds} onAnalog={onAnalog} onButton={onButton} onEncoder={onEncoder} onTouch={setSel} />
+        <Panel spec={spec} values={shown} leds={leds} onAnalog={onAnalog} onButton={onButton} onEncoder={onEncoder} onTouch={setSel} onFileDrop={spec.audio ? dropFile : undefined} />
         <p className="tips">Drag knobs and faders up and down (hold Shift for fine control), click and hold pads, spin encoders with the scroll wheel or by dragging. With the keyboard: Tab to a control, then arrow keys.</p>
 
-        <DawCard bench={bench} spec={spec} log={hostLog} paused={testing} />
+        {spec.audio ? (
+          <ListenCard spec={spec} bench={bench} rig={listen.rig} stats={stats} error={listen.error} onPower={listen.power} onPowerOff={listen.powerOff} busy={testing} />
+        ) : (
+          <DawCard bench={bench} spec={spec} log={hostLog} paused={testing} />
+        )}
         <AutoTest bench={bench} noise={noise} bounce={bounce} fidelity={fidelity} onRunning={setTesting} />
+        {spec.audio && <AudioTest spec={spec} bench={bench} rig={listen.rig} onRunning={setTesting} disabled={testing} />}
 
         <section className="card imperfect">
           <header>
