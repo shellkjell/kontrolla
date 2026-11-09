@@ -3,7 +3,8 @@ import * as THREE from 'three';
 import { OrbitControls } from 'three/examples/jsm/controls/OrbitControls.js';
 import { GROUP_PAD, groupBBox } from '@kontrolla/core';
 import type { DeviceSpec } from '@kontrolla/core';
-import { buildEnclosure, setControlValue, setLeds } from '@kontrolla/enclosure';
+import { buildEnclosure, setControlValue, setLeds, setModule } from '@kontrolla/enclosure';
+import { isSlotId, labelOf, ownerOfSlot } from '../layout/rear';
 import './three.css';
 
 interface Props {
@@ -12,7 +13,7 @@ interface Props {
   onSelect: (ids: string[]) => void;
 }
 
-type Preset = 'iso' | 'top' | 'front';
+type Preset = 'iso' | 'top' | 'front' | 'rear';
 interface Ctx {
   renderer: THREE.WebGLRenderer;
   scene: THREE.Scene;
@@ -21,7 +22,8 @@ interface Ctx {
   root?: THREE.Group;
   marks: THREE.Object3D[];
   render: () => void;
-  frame: (p: Preset) => void;
+  frame: (p: Preset, instant?: boolean) => void;
+  tween: (pos: THREE.Vector3, target: THREE.Vector3, ms: number) => Promise<void>;
 }
 
 const REBUILD_MS = 120;
@@ -38,9 +40,8 @@ function dispose(o: THREE.Object3D) {
 
 /** Coloured floor patches under each group, so strips read as strips from across the room. */
 function addGroupColors(root: THREE.Group, spec: DeviceSpec) {
-  const top = root.getObjectByName('top');
-  const H = spec.layout?.panel.height ?? 0;
-  if (!top) return;
+  const surface = root.getObjectByName('frames-surface'); // rides the top panel's lift and slope
+  if (!surface) return;
   for (const g of spec.groups ?? []) {
     const bb = groupBBox(spec, g.id, GROUP_PAD);
     if (!bb) continue;
@@ -49,9 +50,9 @@ function addGroupColors(root: THREE.Group, spec: DeviceSpec) {
       new THREE.MeshBasicMaterial({ color: g.color ?? '#888888', transparent: true, opacity: 0.3, depthWrite: false }),
     );
     m.rotation.x = -Math.PI / 2;
-    m.position.set(bb.x + bb.w / 2, H + 0.12, bb.y + bb.h / 2);
+    m.position.set(bb.x + bb.w / 2, 0.12, bb.y + bb.h / 2);
     m.name = `group-color:${g.id}`;
-    top.add(m);
+    surface.add(m);
   }
 }
 
@@ -67,6 +68,38 @@ function lightUp(root: THREE.Group, spec: DeviceSpec) {
   }
   setLeds(root, spec, rgb);
   for (const m of spec.meters ?? []) setControlValue(root, spec, m.id, METER_DEMO);
+}
+
+const ease = (t: number) => 1 - (1 - t) ** 3;
+/** Run fn(0..1) over ms on animation frames. */
+const animate = (ms: number, fn: (t: number) => void) =>
+  new Promise<void>((done) => {
+    const t0 = performance.now();
+    const step = (now: number) => {
+      const t = Math.min(1, (now - t0) / ms);
+      fn(t);
+      if (t < 1) requestAnimationFrame(step);
+      else done();
+    };
+    requestAnimationFrame(step);
+  });
+
+/** The slots whose module changed, when that is ALL that changed (otherwise null: rebuild everything). */
+function moduleOnlyDiff(a: DeviceSpec, b: DeviceSpec): string[] | null {
+  const strip = (s: DeviceSpec) => JSON.stringify({ ...s, ioSlots: s.ioSlots?.map((x) => ({ ...x, module: '' })) });
+  if (!a.ioSlots || !b.ioSlots || a.ioSlots.length !== b.ioSlots.length || strip(a) !== strip(b)) return null;
+  const ids = b.ioSlots.filter((s, i) => a.ioSlots![i]!.id === s.id && a.ioSlots![i]!.module !== s.module).map((s) => s.id);
+  return ids.length ? ids : null;
+}
+
+/** Plates take a tint of the strip colour they serve, so each channel's input reads as part of its strip. */
+function tintSlots(root: THREE.Group, spec: DeviceSpec, only?: string[]) {
+  for (const id of only ?? Object.keys(spec.layout?.placements ?? {})) {
+    if (!isSlotId(spec, id)) continue;
+    const col = ownerOfSlot(spec, id)?.color;
+    const mesh = root.getObjectByName(`slot:${id}/plate`) as THREE.Mesh | undefined;
+    if (col && mesh) (mesh.material as THREE.MeshStandardMaterial).color.lerp(new THREE.Color(col), 0.38);
+  }
 }
 
 export default function Viewport3D({ spec, selected, onSelect }: Props) {
@@ -111,18 +144,35 @@ export default function Viewport3D({ spec, selected, onSelect }: Props) {
     const render = () => renderer.render(scene, camera);
     controls.addEventListener('change', render);
 
-    const frame = (p: Preset) => {
+    const tween = (pos: THREE.Vector3, target: THREE.Vector3, ms: number) => {
+      const p0 = camera.position.clone();
+      const t0 = controls.target.clone();
+      return animate(ms, (t) => {
+        const e = ease(t);
+        camera.position.lerpVectors(p0, pos, e);
+        controls.target.lerpVectors(t0, target, e);
+        controls.update();
+        render();
+      });
+    };
+    const frame = (p: Preset, instant = false) => {
       const root = ctx.current?.root;
       if (!root) return;
       const box = new THREE.Box3().setFromObject(root);
       const c = box.getCenter(new THREE.Vector3());
       const r = box.getSize(new THREE.Vector3()).length() / 2;
-      const dist = (r / Math.sin((camera.fov * Math.PI) / 360)) * 0.95;
-      const dir = p === 'top' ? new THREE.Vector3(0, 1, 0.001) : p === 'front' ? new THREE.Vector3(0, 0.25, 1) : new THREE.Vector3(0.55, 0.85, 1);
-      camera.position.copy(c).add(dir.normalize().multiplyScalar(dist));
-      controls.target.copy(c);
-      controls.update();
-      render();
+      const vfov = (camera.fov * Math.PI) / 180;
+      const hfov = 2 * Math.atan(Math.tan(vfov / 2) * camera.aspect); // a tall pane is limited by its width
+      const dist = (r / Math.sin(Math.min(vfov, hfov) / 2)) * 0.95;
+      const dir =
+        p === 'top' ? new THREE.Vector3(0, 1, 0.001) : p === 'front' ? new THREE.Vector3(0, 0.25, 1) : p === 'rear' ? new THREE.Vector3(0.18, 0.3, -1) : new THREE.Vector3(0.55, 0.85, 1);
+      const pos = c.clone().add(dir.normalize().multiplyScalar(dist));
+      if (instant) {
+        camera.position.copy(pos);
+        controls.target.copy(c);
+        controls.update();
+        render();
+      } else void tween(pos, c, 450);
     };
 
     const resize = () => {
@@ -167,7 +217,8 @@ export default function Viewport3D({ spec, selected, onSelect }: Props) {
         const t = tip.current;
         if (!t) return;
         const sp = live.current.spec;
-        const name = id && (sp.controls.find((c) => c.id === id)?.label ?? sp.meters?.find((m) => m.id === id)?.label ?? id);
+        const own = id && isSlotId(sp, id) ? ownerOfSlot(sp, id)?.label : undefined;
+        const name = id && (own ? `${own} · ${labelOf(sp, id)}` : labelOf(sp, id));
         t.hidden = !name;
         if (name) {
           t.textContent = name;
@@ -182,7 +233,7 @@ export default function Viewport3D({ spec, selected, onSelect }: Props) {
     cv.addEventListener('pointerup', onUp);
     cv.addEventListener('pointermove', onMove);
 
-    ctx.current = { renderer, scene, camera, controls, marks: [], render, frame };
+    ctx.current = { renderer, scene, camera, controls, marks: [], render, frame, tween };
     resize();
     return () => {
       cancelAnimationFrame(pending);
@@ -202,19 +253,51 @@ export default function Viewport3D({ spec, selected, onSelect }: Props) {
     };
   }, []);
 
-  // rebuild when the design, the explode slider or the lights change (debounced after the first build)
+  // rebuild when the design, the explode slider or the lights change (debounced after the first build).
+  // A module swap rebuilds only that plate: the old one slides out, the new one slides in.
+  const prev = useRef<{ spec: DeviceSpec; exploded: number; lights: boolean } | undefined>(undefined);
+  const gen = useRef(0);
   useEffect(() => {
+    const me = ++gen.current;
+    const last = prev.current;
+    prev.current = { spec, exploded, lights };
+    const c = ctx.current;
+    const swapped = last && c?.root && last.exploded === exploded && last.lights === lights ? moduleOnlyDiff(last.spec, spec) : null;
+    if (swapped && c) {
+      void (async () => {
+        const root = c.root!;
+        // face the back of the box first so the swap is seen
+        const away = c.camera.position.z - c.controls.target.z > -10;
+        if (away) {
+          c.frame('rear');
+          await new Promise((r) => setTimeout(r, 480));
+        }
+        for (const id of swapped) {
+          const old = root.getObjectByName(`slot:${id}`);
+          if (old && gen.current === me) await animate(170, (t) => ((old.position.z = -46 * t * t), c.render())); // out (rear = -z)
+          if (gen.current !== me) return;
+          setModule(root, spec, id);
+          tintSlots(root, spec, [id]);
+          const nu = root.getObjectByName(`slot:${id}`);
+          if (nu) await animate(340, (t) => ((nu.position.z = -46 * (1 - ease(t))), c.render())); // in
+        }
+        mark();
+        c.render();
+      })();
+      return;
+    }
     const run = () => {
       const c = ctx.current;
       if (!c) return;
       if (c.root) (c.scene.remove(c.root), dispose(c.root));
       const root = buildEnclosure(spec, { exploded });
       addGroupColors(root, spec);
+      tintSlots(root, spec);
       if (lights) lightUp(root, spec);
       c.scene.add(root);
       c.root = root;
       mark();
-      if (!built.current) ((built.current = true), c.frame('iso'));
+      if (!built.current) ((built.current = true), c.frame('iso', true));
       else c.render();
     };
     if (!built.current) return run();
@@ -230,7 +313,7 @@ export default function Viewport3D({ spec, selected, onSelect }: Props) {
     c.marks.forEach((m) => (c.scene.remove(m), dispose(m)));
     c.root.updateMatrixWorld(true);
     c.marks = live.current.selected.flatMap((id) => {
-      const o = c.root!.getObjectByName(id);
+      const o = c.root!.getObjectByName(id) ?? c.root!.getObjectByName(`slot:${id}`);
       if (!o) return [];
       const b = new THREE.BoxHelper(o, 0xff6a2b);
       c.scene.add(b);
@@ -248,8 +331,8 @@ export default function Viewport3D({ spec, selected, onSelect }: Props) {
     <section className="v3" aria-label="3D model of the enclosure">
       <div className="v3-bar" role="toolbar" aria-label="3D view">
         <div className="seg" role="group" aria-label="Camera">
-          {(['iso', 'top', 'front'] as const).map((p) => (
-            <button key={p} type="button" onClick={() => ctx.current?.frame(p)}>{p === 'iso' ? '3/4' : p === 'top' ? 'Top' : 'Front'}</button>
+          {(['iso', 'top', 'front', 'rear'] as const).map((p) => (
+            <button key={p} type="button" onClick={() => ctx.current?.frame(p)}>{p === 'iso' ? '3/4' : p === 'top' ? 'Top' : p === 'front' ? 'Front' : 'Rear'}</button>
           ))}
         </div>
         <label className="v3-explode">

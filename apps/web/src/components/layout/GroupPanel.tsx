@@ -14,10 +14,11 @@ interface GroupProps {
   onSelect: (ids: string[]) => void;
   onReveal: (id: string) => void;
   compact?: boolean; // one slim row, for when a single member is being edited below
+  extra?: React.ReactNode; // more actions in the compact row
 }
 
 /** One group: select it, duplicate it ×N (the mixer-strip killer feature), rename, recolour, ungroup. */
-export function GroupPanel({ spec, group, onChange, onSelect, onReveal, compact }: GroupProps) {
+export function GroupPanel({ spec, group, onChange, onSelect, onReveal, compact, extra }: GroupProps) {
   const [copies, setCopies] = useState(1);
   const [error, setError] = useState('');
   const id = useId();
@@ -42,10 +43,11 @@ export function GroupPanel({ spec, group, onChange, onSelect, onReveal, compact 
       <header>
         <i className="gchip" aria-hidden />
         <div>
-          <span className="eyebrow">{noun(group)} · {group.members.length} parts</span>
+          <span className="eyebrow">{noun(group)}{compact ? '' : ` · ${group.members.length} parts`}</span>
           <h3>{group.label}</h3>
         </div>
         <div className="gp-actions">
+          {extra}
           <button className="btn" onClick={() => onSelect(group.members)}>Select all</button>
           <button className="btn ghost danger" onClick={() => onChange(ungroup(spec, group.id))}>Ungroup</button>
         </div>

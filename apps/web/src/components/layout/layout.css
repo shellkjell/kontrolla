@@ -122,3 +122,86 @@
 .gp.compact { flex-direction: row; flex-wrap: wrap; align-items: center; gap: 8px 16px; padding: 10px 16px 10px 20px; }
 .gp.compact header { flex: 1; min-width: 220px; }
 .gp.compact h3 { font-size: 16px; margin-top: 3px; }
+.gp.compact .eyebrow { white-space: nowrap; }
+
+/* ---- rear wall ---- */
+.lc.rear .lc-plate { fill: #d4ccb7; }
+.lc-bands rect { fill: rgba(42, 37, 25, 0.16); }
+.slot-band { fill-opacity: 0.1; transition: fill-opacity 0.15s; }
+.slot-band.hot { fill-opacity: 0.3; }
+.lc-gframe.hot .gline { stroke-width: 2.6; stroke-dasharray: none; }
+.item.k-slot { cursor: grab; }
+.item.k-slot .occ { stroke-dasharray: none; stroke: rgba(42, 37, 25, 0.25); }
+.item.k-port .cap { fill: #3a352b; }
+.lbl.mod { letter-spacing: 0.06em; }
+.lc-wedge { position: absolute; right: 10px; top: 26px; pointer-events: none; background: rgba(15, 13, 10, 0.75); border: 1px solid var(--line2); border-radius: 8px; }
+.lc-wedge polygon { fill: rgba(216, 162, 74, 0.14); stroke: var(--brass); stroke-width: 1.2; stroke-linejoin: round; }
+.lc-wedge text { font: 9px var(--mono); fill: var(--dim); }
+.lc-wedge text.dim { fill: var(--faint); }
+
+/* connectors + module plates (drawn in mm) */
+.mp-plate { fill: #30343b; stroke: #14161a; stroke-width: 0.5; }
+.mp-plate.blank { fill: #2a2d33; }
+.mp-open { fill: none; stroke: rgba(255, 255, 255, 0.14); stroke-width: 0.35; stroke-dasharray: 1.6 1.2; }
+.mp-screw { fill: #b8bcc2; stroke: #5c6168; stroke-width: 0.3; }
+.mp-cross { fill: none; stroke: rgba(255, 255, 255, 0.14); stroke-width: 0.5; }
+.cg-flange { fill: #1d2025; stroke: #4a5059; stroke-width: 0.4; }
+.cg-body { fill: #0c0d0f; stroke: #6c727a; stroke-width: 0.5; }
+.cg-face { fill: #1b1d21; }
+.cg-sock { fill: #000; }
+.cg-pin { fill: #c8ccd2; }
+.cg-metal { fill: #b8bcc2; stroke: #6c727a; stroke-width: 0.4; }
+.cg-rca { fill: #eee; }
+.cg-rca.r { fill: #cc2222; }
+.cg-gold { fill: #d8b04a; }
+.cg-label { font: 600 3px var(--mono); fill: #aab0b8; }
+
+/* ---- I/O module card ---- */
+.io { --gc: var(--brass); position: relative; display: flex; flex-direction: column; gap: 12px; padding: 16px 20px 18px 22px; border: 1px solid var(--line); border-radius: 12px; background: linear-gradient(180deg, var(--card2), var(--card)); overflow: hidden; }
+.io::before { content: ''; position: absolute; inset: 0 auto 0 0; width: 5px; background: var(--gc); }
+.io header { display: flex; align-items: center; gap: 12px; }
+.io header > div { flex: 1; min-width: 0; }
+.io h3 { font: 500 20px/1.2 var(--display); margin-top: 6px; }
+.io h4 { font: 500 17px var(--display); margin: 0 0 8px; }
+.io .help { margin: 0; }
+.io-grid { list-style: none; margin: 0; padding: 0; display: grid; grid-template-columns: repeat(auto-fill, minmax(188px, 1fr)); gap: 10px; }
+.io-tile { width: 100%; height: 100%; display: grid; grid-template-columns: 38px 1fr; grid-template-areas: 'pv name' 'pv badges' 'pv price'; column-gap: 12px; row-gap: 5px; align-content: start; text-align: left; padding: 10px; background: #120f0b; border: 1px solid var(--line2); border-radius: 10px; transition: border-color 0.15s, background 0.15s, transform 0.15s; }
+.io-tile:hover:not(:disabled) { border-color: var(--brass); transform: translateY(-1px); }
+.io-tile[aria-checked='true'] { border-color: var(--signal); background: rgba(255, 106, 43, 0.07); box-shadow: 0 0 0 1px var(--signal); }
+.io-tile:disabled { opacity: 0.4; }
+.io-tile .mp-svg { grid-area: pv; width: 38px; height: 95px; }
+.io-name { grid-area: name; font-weight: 600; font-size: 13.5px; line-height: 1.25; }
+.io-badges { grid-area: badges; display: flex; flex-wrap: wrap; gap: 4px; }
+.io-price { grid-area: price; font: 12px var(--mono); color: var(--dim); }
+.mb { font: 500 10.5px/1 var(--mono); padding: 3px 6px; border-radius: 4px; background: var(--card2); border: 1px solid var(--line2); color: var(--dim); white-space: nowrap; }
+.mb.level { color: var(--info); border-color: rgba(132, 171, 183, 0.4); }
+.mb.abx { color: var(--brass); border-color: rgba(216, 162, 74, 0.5); }
+.mb.ph { color: var(--err); border-color: rgba(240, 116, 90, 0.5); }
+.mb.experimental { color: var(--warn); border-color: rgba(235, 181, 77, 0.5); background: rgba(235, 181, 77, 0.08); }
+.mb.proven { color: var(--ok); border-color: rgba(156, 194, 123, 0.5); background: rgba(156, 194, 123, 0.08); }
+.io-detail { padding-top: 12px; border-top: 1px dashed var(--line2); }
+.io-detail dl { display: grid; gap: 8px; margin: 0 0 12px; }
+.io-detail dl div { display: grid; grid-template-columns: 110px 1fr; gap: 12px; font-size: 13.5px; }
+.io-detail dt { font: 500 10.5px var(--mono); letter-spacing: 0.12em; text-transform: uppercase; color: var(--brass); padding-top: 3px; }
+.io-detail dd { margin: 0; color: var(--ink); }
+.io-detail .callout { margin: 0 0 10px; }
+
+/* ---- audio board card ---- */
+.board { display: flex; flex-direction: column; gap: 10px; }
+.board-list { list-style: none; margin: 0; padding: 0; display: grid; gap: 6px; }
+.board-opt { width: 100%; display: grid; gap: 4px; text-align: left; padding: 9px 11px; background: #120f0b; border: 1px solid var(--line2); border-radius: 9px; transition: border-color 0.15s; }
+.board-opt:hover { border-color: var(--brass); }
+.board-opt[aria-checked='true'] { border-color: var(--signal); box-shadow: 0 0 0 1px var(--signal); background: rgba(255, 106, 43, 0.06); }
+.board-name { font-weight: 600; font-size: 13.5px; }
+.board-meta { font: 11.5px var(--mono); color: var(--dim); }
+.board-meta b { color: var(--ink); font-weight: 500; }
+.board .mb { justify-self: start; }
+.bcap { display: grid; gap: 5px; font: 11.5px var(--mono); color: var(--dim); }
+.bcap-bar { display: flex; gap: 3px; }
+.bcap-bar i { flex: 1; height: 8px; border-radius: 2px; background: #2a251b; }
+.bcap-bar i.on { background: var(--ok); }
+.bcap.over .bcap-bar i.on { background: var(--err); }
+.board .help { margin: 0; }
+.board .callout { margin: 0; display: grid; gap: 10px; }
+.board-actions { display: flex; flex-wrap: wrap; gap: 8px; }
+.board-actions .btn { padding: 7px 12px; font-size: 13px; text-align: left; }

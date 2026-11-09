@@ -1,12 +1,15 @@
 import { Suspense, lazy, useEffect, useMemo, useState } from 'react';
-import { MCUS, ensureLayout, groupOf, validateLayout } from '@kontrolla/core';
+import { IO_MODULES, MCUS, ensureLayout, groupOf, validateAudio, validateLayout } from '@kontrolla/core';
 import type { Control, DeviceSpec, Group, Issue, McuId } from '@kontrolla/core';
 import { Editor, MeterEditor } from '../components/Editor';
 import { Glyph } from '../components/Glyph';
 import { Issues } from '../components/Issues';
+import { AudioBoardCard } from '../components/layout/AudioBoardCard';
 import { GroupPanel, SelectionCard } from '../components/layout/GroupPanel';
+import { IoModuleCard } from '../components/layout/IoModuleCard';
 import { LayoutCanvas } from '../components/layout/LayoutCanvas';
-import { applyStripPattern, newMeter, removeItems, stripInfo } from '../components/layout/ops';
+import { addMasterModule, applyStripPattern, newMeter, removeItems, stripInfo } from '../components/layout/ops';
+import { MODULE_SHORT, faceOf, isSlotId, labelOf as placedLabel, ownerOfSlot, slotOfGroup } from '../components/layout/rear';
 import { noteName } from '../midi';
 import { labelOf, pinLabel, pinUsers, pinsOf } from '../pins';
 import { KIND_INFO, newControl, withMcu } from '../store';
@@ -26,6 +29,22 @@ interface Props {
 }
 
 type View = '2d' | '3d' | 'split';
+type FaceMode = 'top' | 'rear' | 'both';
+const FACE_KEY = 'kontrolla.design.face';
+const FACES: { id: FaceMode; label: string }[] = [
+  { id: 'top', label: 'Top' },
+  { id: 'rear', label: 'Rear' },
+  { id: 'both', label: 'Both' },
+];
+const loadFace = (): FaceMode => {
+  try {
+    const v = localStorage.getItem(FACE_KEY);
+    if (v === 'top' || v === 'rear' || v === 'both') return v;
+  } catch {
+    // storage unavailable: default face
+  }
+  return 'top';
+};
 const VIEW_KEY = 'kontrolla.design.view';
 const VIEWS: { id: View; label: string }[] = [
   { id: '2d', label: '2D layout' },
@@ -49,9 +68,19 @@ export function Design({ spec, allocated, issues, setSpec, onNext, focusId }: Pr
   const commit = setSpec; // App's setSpec is the one undoable funnel
   const [sel, setSel] = useState<string[]>(() => (focusId ? [focusId] : spec.controls[0] ? [spec.controls[0].id] : []));
   const [view, setViewState] = useState<View>(loadView);
+  const [face, setFaceState] = useState<FaceMode>(loadFace);
+  const [hot, setHot] = useState<string | null>(null);
   const [open, setOpen] = useState<Record<string, boolean>>({});
   const [focus, setFocus] = useState<{ id: string; n: number; fit?: boolean }>();
   const [note, setNote] = useState('');
+  const setFace = (f: FaceMode) => {
+    setFaceState(f);
+    try {
+      localStorage.setItem(FACE_KEY, f);
+    } catch {
+      // storage unavailable: the choice just won't stick
+    }
+  };
   const setView = (v: View) => {
     setViewState(v);
     try {
@@ -70,7 +99,12 @@ export function Design({ spec, allocated, issues, setSpec, onNext, focusId }: Pr
   const laid = needsLayout ? ensured : spec;
   const model = useMemo(() => (needsLayout ? ensureLayout(allocated) : allocated), [needsLayout, allocated]);
 
-  const exists = (id: string) => spec.controls.some((c) => c.id === id) || !!spec.meters?.some((m) => m.id === id);
+  const exists = (id: string) => spec.controls.some((c) => c.id === id) || !!spec.meters?.some((m) => m.id === id) || (isSlotId(spec, id) && !!laid.layout?.placements[id]);
+  /** Which face a thing lives on; selecting it shows that face when only one is on screen. */
+  const showFaceOf = (ids: string[]) => {
+    const f = ids.length ? faceOf(laid.layout?.placements[ids[0]!]) : undefined;
+    if (f && face !== 'both' && face !== f) setFace(f);
+  };
   const selected = sel.filter(exists);
   const selSet = new Set(selected);
   const one = selected.length === 1 ? selected[0]! : undefined;
@@ -80,10 +114,13 @@ export function Design({ spec, allocated, issues, setSpec, onNext, focusId }: Pr
   const users = pinUsers(allocated);
 
   const layoutIssues = useMemo(() => validateLayout(laid), [laid]);
+  const audioIssues = useMemo(() => validateAudio(spec), [spec]);
   const allIssues = useMemo(() => {
     const seen = new Set(issues.map((i) => i.severity + i.message));
-    return [...issues, ...layoutIssues.filter((i) => !seen.has(i.severity + i.message))];
-  }, [issues, layoutIssues]);
+    // screw-hole cutouts are reported as "<id>#h0": point at the part itself
+    const fresh = [...layoutIssues, ...audioIssues].filter((i) => !seen.has(i.severity + i.message)).map((i) => (i.controlId?.includes('#') ? { ...i, controlId: i.controlId.split('#')[0] } : i));
+    return [...issues, ...fresh.filter((i, k) => fresh.findIndex((j) => j.severity === i.severity && j.message === i.message) === k)];
+  }, [issues, layoutIssues, audioIssues]);
 
   const select = (ids: string[]) => {
     setSel(ids);
@@ -91,6 +128,7 @@ export function Design({ spec, allocated, issues, setSpec, onNext, focusId }: Pr
   };
   const goTo = (id: string) => {
     select([id]);
+    showFaceOf([id]);
     setFocus((f) => ({ id, n: (f?.n ?? 0) + 1 }));
   };
   const add = (kind: Kind, lit = false) => {
@@ -104,7 +142,9 @@ export function Design({ spec, allocated, issues, setSpec, onNext, focusId }: Pr
     commit({ ...spec, meters: [...(spec.meters ?? []), m] });
     goTo(m.id);
   };
-  const remove = (ids: string[]) => {
+  const remove = (all: string[]) => {
+    const ids = all.filter((id) => !isSlotId(spec, id)); // slots stay: they belong to the strip, not to the list of parts
+    if (!ids.length) return;
     const order = [...spec.controls.map((c) => c.id), ...(spec.meters ?? []).map((m) => m.id)];
     const next = removeItems(spec, ids);
     const i = Math.min(...ids.map((id) => order.indexOf(id)));
@@ -116,12 +156,32 @@ export function Design({ spec, allocated, issues, setSpec, onNext, focusId }: Pr
     const s = allIssues.filter((i) => i.controlId === id).map((i) => i.severity);
     return s.includes('error') ? 'error' : s.includes('warning') ? 'warning' : undefined;
   };
-  const pick = (id: string, e: React.MouseEvent) => select(e.shiftKey || e.metaKey || e.ctrlKey ? (selSet.has(id) ? selected.filter((x) => x !== id) : [...selected, id]) : [id]);
+  const pick = (id: string, e: React.MouseEvent) => {
+    const multi = e.shiftKey || e.metaKey || e.ctrlKey;
+    select(multi ? (selSet.has(id) ? selected.filter((x) => x !== id) : [...selected, id]) : [id]);
+    if (!multi) showFaceOf([id]);
+  };
 
   // ---- control list: groups first, then loose items ----
   const groups = spec.groups ?? [];
   const inGroup = new Set(groups.flatMap((g) => g.members));
   const loose = [...spec.controls.map((c) => c.id), ...(spec.meters ?? []).map((m) => m.id)].filter((id) => !inGroup.has(id));
+  // rear I/O: one row per channel slot, then the master output plates
+  const slotIds = [...(spec.ioSlots ?? []).map((s) => s.id), ...(spec.audio?.master.outputs ?? []).filter((m) => IO_MODULES[m]?.mount === 'slot').map((m) => `master:${m}`)];
+  const slotRow = (id: string) => {
+    const g = ownerOfSlot(spec, id);
+    const mod = IO_MODULES[id.startsWith('master:') ? id.slice(7) : spec.ioSlots?.find((s) => s.id === id)?.module ?? ''];
+    return (
+      <li key={id}>
+        <button className="row grouped" style={{ '--gc': g?.color } as React.CSSProperties} aria-current={selSet.has(id)} onClick={(e) => pick(id, e)}>
+          <span className="glyph slotplate" aria-hidden />
+          <span className="name">{g ? (id.startsWith('master:') ? 'Master out' : `${g.label} input`) : id}</span>
+          <span className="meta">{mod ? MODULE_SHORT[mod.id] ?? mod.name : 'blank plate'}</span>
+          <span className="pin">{mod ? `${mod.codecPorts} codec ${mod.direction === 'in' ? 'in' : 'out'}` : ''}</span>
+        </button>
+      </li>
+    );
+  };
   const isOpen = (g: Group) => open[g.id] ?? (groups.length <= 3 || g.members.some((m) => selSet.has(m)));
 
   const row = (id: string, g?: Group) => {
@@ -157,7 +217,19 @@ export function Design({ spec, allocated, issues, setSpec, onNext, focusId }: Pr
   const sameGroup = selected.length > 0 ? groupOf(spec, selected[0]!) : undefined;
   const inOne = sameGroup && selected.every((id) => sameGroup.members.includes(id)) ? sameGroup : undefined; // everything selected sits in one group
   const wholeGroup = inOne && inOne.members.length === selected.length;
-  const groupCard = (g: Group, compact: boolean) => <GroupPanel key={g.id} compact={compact} spec={spec} group={g} onChange={commit} onSelect={select} onReveal={(id) => setFocus((f) => ({ id, n: (f?.n ?? 0) + 1, fit: true }))} />;
+  const jumpToSlot = (slot: string) => {
+    select([slot]);
+    showFaceOf([slot]);
+    setFocus((f) => ({ id: slot, n: (f?.n ?? 0) + 1 }));
+  };
+  const groupCard = (g: Group, compact: boolean) => {
+    const slot = g.kind === 'strip' ? slotOfGroup(spec, g.id) : undefined;
+    const mod = slot ? spec.ioSlots?.find((x) => x.id === slot)?.module : undefined;
+    const extra = compact && slot && mod ? <button className="btn" onClick={() => jumpToSlot(slot)} title="Choose what plugs into this channel">Input: {MODULE_SHORT[mod] ?? mod}</button> : undefined;
+    return <GroupPanel key={g.id} compact={compact} extra={extra} spec={spec} group={g} onChange={commit} onSelect={select} onReveal={(id) => setFocus((f) => ({ id, n: (f?.n ?? 0) + 1, fit: true }))} />;
+  };
+  const slotSel = one && isSlotId(spec, one) ? one : undefined;
+  const stripSlot = inOne && wholeGroup && inOne.kind === 'strip' ? slotOfGroup(spec, inOne.id) : undefined;
   const pattern = one && stripInfo(spec, one);
   const applyPattern = () => {
     if (!one || !pattern) return;
@@ -178,6 +250,8 @@ export function Design({ spec, allocated, issues, setSpec, onNext, focusId }: Pr
           </select>
         </div>
 
+        <AudioBoardCard spec={spec} onChange={commit} />
+
         <h2 className="eyebrow">Controls · {spec.controls.length + (spec.meters?.length ?? 0)}</h2>
         {spec.controls.length + (spec.meters?.length ?? 0) === 0 && <p className="empty-note">Nothing here yet. Add a knob, fader, pad or encoder below.</p>}
         <ul className="rows">
@@ -196,6 +270,19 @@ export function Design({ spec, allocated, issues, setSpec, onNext, focusId }: Pr
           ))}
           {loose.map((id) => row(id))}
         </ul>
+        {slotIds.length > 0 && (
+          <>
+            <h2 className="eyebrow">Rear I/O · {slotIds.length}</h2>
+            <ul className="rows">{slotIds.map(slotRow)}</ul>
+          </>
+        )}
+        {spec.audio && Object.values(IO_MODULES).filter((m) => m.direction === 'out' && m.mount === 'slot' && !spec.audio!.master.outputs.includes(m.id)).length > 0 && (
+          <div className="adders" role="group" aria-label="Add an output plate">
+            {Object.values(IO_MODULES).filter((m) => m.direction === 'out' && m.mount === 'slot' && !spec.audio!.master.outputs.includes(m.id)).map((m) => (
+              <button key={m.id} className="btn add" onClick={() => (commit(addMasterModule(spec, m.id)), select([`master:${m.id}`]))}><span className="glyph slotplate" aria-hidden />{MODULE_SHORT[m.id] ?? m.name}</button>
+            ))}
+          </div>
+        )}
         <div className="adders" role="group" aria-label="Add a control">
           {(Object.keys(KIND_INFO) as Kind[]).map((k) => (
             <button key={k} className="btn add" onClick={() => add(k)}><Glyph kind={k} />{KIND_INFO[k].noun}</button>
@@ -210,7 +297,7 @@ export function Design({ spec, allocated, issues, setSpec, onNext, focusId }: Pr
         )}
       </aside>
 
-      <main className="stage">
+      <main className="dsg-stage">
         {spec.controls.length + (spec.meters?.length ?? 0) > 0 && (
           <div className="viewbar">
             <div className="seg" role="group" aria-label="View">
@@ -218,11 +305,19 @@ export function Design({ spec, allocated, issues, setSpec, onNext, focusId }: Pr
                 <button key={v.id} type="button" aria-pressed={view === v.id} onClick={() => setView(v.id)}>{v.label}</button>
               ))}
             </div>
+            {view !== '3d' && (
+              <div className="seg" role="group" aria-label="Face">
+                {FACES.map((f) => (
+                  <button key={f.id} type="button" aria-pressed={face === f.id} title={f.id === 'rear' ? 'The back wall: I/O slots, MIDI, USB, power' : f.id === 'both' ? 'Top and rear together' : 'The top panel'} onClick={() => setFace(f.id)}>{f.label}</button>
+                ))}
+              </div>
+            )}
           </div>
         )}
         {spec.controls.length + (spec.meters?.length ?? 0) > 0 && laid.layout && (
-          <div className={`views ${view}`}>
-            {view !== '3d' && <LayoutCanvas spec={laid} selected={selected} onSelect={select} onChange={commit} onRemove={remove} focus={focus} />}
+          <div className={`views ${view} face-${face}`}>
+            {view !== '3d' && face !== 'rear' && <LayoutCanvas face="top" spec={laid} selected={selected} onSelect={select} onChange={commit} onRemove={remove} focus={focus} hot={hot} onHot={setHot} onFace={(f) => face !== 'both' && setFace(f)} />}
+            {view !== '3d' && face !== 'top' && <LayoutCanvas face="rear" spec={laid} selected={selected} onSelect={select} onChange={commit} onRemove={remove} focus={focus} hot={hot} onHot={setHot} onFace={(f) => face !== 'both' && setFace(f)} />}
             {view !== '2d' && (
               <Suspense fallback={<div className="v3 v3-fail">Loading the 3D model…</div>}>
                 <Viewport3D spec={model} selected={selected} onSelect={select} />
@@ -233,12 +328,14 @@ export function Design({ spec, allocated, issues, setSpec, onNext, focusId }: Pr
 
         <div className="dsg-inspector">
           {note && <p className="callout" role="status">{note}</p>}
-          {selected.length > 1 && (
+          {selected.length > 1 && !selected.some((id) => isSlotId(spec, id)) && (
             <>
               {inOne && groupCard(inOne, false)}
+              {stripSlot && <IoModuleCard spec={spec} slotId={stripSlot} onChange={commit} onSelect={select} />}
               {!wholeGroup && <SelectionCard spec={spec} selected={selected} onChange={commit} onRemove={remove} />}
             </>
           )}
+          {slotSel && <IoModuleCard key={slotSel} spec={spec} slotId={slotSel} onChange={commit} onSelect={(ids) => (select(ids), showFaceOf(ids))} />}
           {control && (
             <>
               {itemGroup && groupCard(itemGroup, true)}
@@ -270,7 +367,7 @@ export function Design({ spec, allocated, issues, setSpec, onNext, focusId }: Pr
               />
             </>
           )}
-          {one && !control && !meter && <p className="empty-note">This part has no settings of its own.</p>}
+          {one && !control && !meter && !slotSel && <p className="empty-note">This part has no settings of its own.</p>}
           {selected.length === 0 && (
             <div className="empty">
               <h2>{spec.controls.length ? 'Pick something to edit' : 'Start with a control'}</h2>

@@ -1,11 +1,14 @@
-import { useEffect, useMemo, useRef, useState } from 'react';
+import { useEffect, useId, useMemo, useRef, useState } from 'react';
 import type { KeyboardEvent as RKeyboardEvent, PointerEvent as RPointerEvent, ReactNode } from 'react';
 import { EDGE_MIN, GROUP_PAD, PARTS, autoLayout, boxOf, cutoutsOf, groupBBox, validateLayout } from '@kontrolla/core';
 import type { Annotation, DeviceSpec, Group, Issue, Placement } from '@kontrolla/core';
 import { clamp } from '../fields';
 import { GRIDS, alignPlacements, distributePlacements, hits, r2, snapMove, snapTo, union } from './geometry';
 import type { Align, Guide, Pt, Rect } from './geometry';
+import { ModulePlate } from './ModuleArt';
 import { editLayout, moveAnnotation, newAnnotationId, withPlacements } from './ops';
+import { MODULE_SHORT, faceOf, flipRear, isSlotId, labelOf, moduleIdOf, ownerOfSlot, virtualPart } from './rear';
+import type { Face } from './rear';
 import './layout.css';
 
 type Tool = 'select' | 'hand' | 'pen' | 'text' | 'rect' | 'erase';
@@ -23,11 +26,15 @@ type Drag =
 
 interface Props {
   spec: DeviceSpec; // layout present
+  face?: Face; // 'top' (default) or the rear wall
   selected: string[];
   onSelect: (ids: string[]) => void;
   onChange: (s: DeviceSpec) => void;
   onRemove: (ids: string[]) => void;
   focus?: { id: string; n: number; fit?: boolean }; // when n changes: bring this control into view, or refit the whole panel
+  hot?: string | null; // strip / group id the pointer is over somewhere (top or rear), highlighted here too
+  onHot?: (groupId: string | null) => void;
+  onFace?: (f: Face) => void; // ask the page to show the other face (the "Ch n" link on the rear wall)
 }
 
 const TOOLS: { id: Tool; label: string; key: string; icon: ReactNode }[] = [
@@ -55,9 +62,15 @@ const HAND_D = 85; // palm width, mm: what one resting hand covers
 const FINGER_D = 18; // a fingertip's contact patch
 const NICE = [1, 2, 5, 10, 20, 50, 100];
 const meterColor = (i: number, n: number) => (i / n < 0.6 ? '#3f9f5f' : i / n < 0.85 ? '#c9a524' : '#cf4a3a');
-const KIND_NOUN: Record<string, string> = { pot: 'knob', fader: 'fader', button: 'button', encoder: 'encoder', meter: 'meter' };
+const KIND_NOUN: Record<string, string> = { pot: 'knob', fader: 'fader', button: 'button', encoder: 'encoder', meter: 'meter', slot: 'I/O slot', port: 'opening' };
+const REAR_TOOLS: Tool[] = ['select', 'hand'];
 
-export function LayoutCanvas({ spec, selected, onSelect, onChange, onRemove, focus }: Props) {
+export function LayoutCanvas({ spec: real, face = 'top', selected, onSelect, onChange: emitReal, onRemove, focus, hot, onHot, onFace }: Props) {
+  const rear = face === 'rear';
+  const uid = useId().replace(/\W/g, ''); // two canvases can be on screen: ids for patterns / clips must not clash
+  // The rear wall measures y UP from its bottom edge; the canvas draws on a mirrored copy and mirrors edits back.
+  const spec = useMemo(() => (rear ? flipRear(real) : real), [real, rear]);
+  const onChange = (s: DeviceSpec) => emitReal(rear ? flipRear(s) : s);
   const wrap = useRef<HTMLDivElement>(null);
   const svgRef = useRef<SVGSVGElement>(null);
   const handsRef = useRef<SVGGElement>(null);
@@ -84,32 +97,44 @@ export function LayoutCanvas({ spec, selected, onSelect, onChange, onRemove, foc
   const k = view.k;
   const selSet = useMemo(() => new Set(selected), [selected]);
 
+  // Everything placed on this face: controls, meters, and the ports / I/O slots core adds.
+  const faceIds = useMemo(() => Object.entries(spec.layout!.placements).filter(([, p]) => faceOf(p) === face).map(([id]) => id), [spec, face]);
+
   // Boxes at rest: the reference for snapping and marquee, unaffected by the drag in progress.
   const boxes = useMemo(() => {
     const m = new Map<string, Rect>();
-    for (const id of [...spec.controls.map((c) => c.id), ...(spec.meters ?? []).map((x) => x.id)]) {
+    for (const id of faceIds) {
       const b = boxOf(spec, id);
       if (b) m.set(id, b);
     }
     return m;
-  }, [spec]);
+  }, [spec, faceIds]);
 
   // What is drawn: the committed spec with the drag's draft laid over it.
   const live = useMemo<DeviceSpec>(() => {
     if (drag?.t === 'move' && drag.moved) return { ...spec, layout: { ...lay, placements: { ...lay.placements, ...drag.draft } } };
-    if (drag?.t === 'panel') return { ...spec, layout: { ...lay, panel: { ...lay.panel, width: drag.w, depth: drag.d } } };
+    if (drag?.t === 'panel') {
+      const s = { ...real, layout: { ...real.layout!, panel: { ...real.layout!.panel, width: drag.w, ...(rear ? { height: drag.d } : { depth: drag.d }) } } };
+      return rear ? flipRear(s) : s;
+    }
     return spec;
-  }, [spec, lay, drag]);
+  }, [spec, real, lay, drag, rear]);
   const L = live.layout!;
-  const cuts = useMemo(() => new Map(cutoutsOf(live).map((c) => [c.id, c])), [live]);
+  const D = rear ? L.panel.height : L.panel.depth; // vertical extent of what is drawn
+  const cuts = useMemo(() => new Map(cutoutsOf(live, face).map((c) => [c.id, c])), [live, face]);
   const issues = useMemo(() => validateLayout(live), [live]);
   const owner = useMemo(() => new Map((spec.groups ?? []).flatMap((g) => g.members.map((id) => [id, g] as const))), [spec.groups]);
   const items = useMemo(
-    () => [
-      ...spec.controls.map((c) => ({ id: c.id, kind: c.kind as string, part: c.part, label: c.label || c.id, led: c.kind === 'button' ? c.led : undefined })),
-      ...(spec.meters ?? []).map((m) => ({ id: m.id, kind: 'meter', part: m.part, label: m.label || m.id, led: undefined, count: m.ledCount })),
-    ].filter((it) => L.placements[it.id] && PARTS[it.part]?.footprint),
-    [spec.controls, spec.meters, L.placements],
+    () =>
+      faceIds.flatMap((id) => {
+        const c = spec.controls.find((x) => x.id === id);
+        const m = c ? undefined : spec.meters?.find((x) => x.id === id);
+        const part = c?.part ?? m?.part ?? virtualPart(spec, id);
+        if (!part || !PARTS[part]?.footprint) return [];
+        const kind = c ? (c.kind as string) : m ? 'meter' : isSlotId(spec, id) ? 'slot' : 'port';
+        return [{ id, kind, part, label: labelOf(spec, id), led: c?.kind === 'button' ? c.led : undefined, count: m?.ledCount }];
+      }),
+    [spec, faceIds],
   );
   const halos = useMemo(() => haloMap(live, issues, items), [live, issues, items]);
   const problems = { err: issues.filter((i) => i.severity === 'error').length, warn: issues.filter((i) => i.severity === 'warning').length };
@@ -118,8 +143,8 @@ export function LayoutCanvas({ spec, selected, onSelect, onChange, onRemove, foc
   const fit = () => {
     autoFit.current = true;
     const pad = 38;
-    const kk = clamp(Math.min((size.w - 2 * pad) / L.panel.width, (size.h - 2 * pad) / L.panel.depth), 0.4, 20);
-    setView({ k: kk, x: (size.w - L.panel.width * kk) / 2, y: (size.h - L.panel.depth * kk) / 2 });
+    const kk = clamp(Math.min((size.w - 2 * pad) / L.panel.width, (size.h - 2 * pad) / D), 0.4, 20);
+    setView({ k: kk, x: (size.w - L.panel.width * kk) / 2, y: (size.h - D * kk) / 2 });
   };
   const zoomAt = (f: number, cx: number, cy: number) =>
     setView((v) => {
@@ -140,7 +165,7 @@ export function LayoutCanvas({ spec, selected, onSelect, onChange, onRemove, foc
   useEffect(() => {
     if (autoFit.current && size.w > 0) fit();
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [size, lay.panel.width, lay.panel.depth]);
+  }, [size, lay.panel.width, D, face]);
   useEffect(() => {
     const el = svgRef.current!;
     const wheel = (e: WheelEvent) => {
@@ -174,9 +199,9 @@ export function LayoutCanvas({ spec, selected, onSelect, onChange, onRemove, foc
   const moveHands = (p: Pt | null) => {
     const g = handsRef.current;
     if (!g) return;
-    g.style.display = p && hands ? '' : 'none';
+    g.style.display = p && hands && !rear ? '' : 'none';
     const reach = new Set<string>();
-    if (p && hands) {
+    if (p && hands && !rear) {
       g.setAttribute('transform', `translate(${p.x} ${p.y})`);
       for (const [id, b] of boxes) if (Math.hypot(b.x + b.w / 2 - p.x, b.y + b.h / 2 - p.y) <= HAND_D / 2) reach.add(id);
       if (handsText.current) handsText.current.textContent = `${reach.size} in reach`;
@@ -227,20 +252,21 @@ export function LayoutCanvas({ spec, selected, onSelect, onChange, onRemove, foc
     const p = toMm(e);
     const multi = e.shiftKey || e.metaKey || e.ctrlKey;
     e.currentTarget.setPointerCapture(e.pointerId);
+    if (rear && !REAR_TOOLS.includes(tool)) setTool('select');
     if (e.button === 1 || spaceRef.current || tool === 'hand') {
       e.preventDefault();
       autoFit.current = false;
       return setDrag({ t: 'pan', sx: e.clientX, sy: e.clientY, v: view });
     }
-    if (tool === 'pen') return setDrag({ t: 'pen', points: [[r2(p.x), r2(p.y)]] });
-    if (tool === 'rect') return setDrag({ t: 'rect', a: { x: snapTo(p.x, grid), y: snapTo(p.y, grid) }, b: { x: snapTo(p.x, grid), y: snapTo(p.y, grid) } });
-    if (tool === 'text') {
+    if (!rear && tool === 'pen') return setDrag({ t: 'pen', points: [[r2(p.x), r2(p.y)]] });
+    if (!rear && tool === 'rect') return setDrag({ t: 'rect', a: { x: snapTo(p.x, grid), y: snapTo(p.y, grid) }, b: { x: snapTo(p.x, grid), y: snapTo(p.y, grid) } });
+    if (!rear && tool === 'text') {
       e.preventDefault(); // keep focus for the input that is about to open
       const hit = t.closest<SVGElement>('[data-ann]');
       const a = hit && lay.annotations.find((x) => x.id === hit.dataset.ann);
       return setTextEdit(a?.kind === 'text' ? { id: a.id, x: a.x, y: a.y, value: a.text, size: a.size ?? 4 } : { x: snapTo(p.x, grid), y: snapTo(p.y, grid), value: '', size: 4 });
     }
-    if (tool === 'erase') {
+    if (!rear && tool === 'erase') {
       const hit = t.closest<SVGElement>('[data-ann]');
       return setDrag({ t: 'erase', gone: hit ? [hit.dataset.ann!] : [] });
     }
@@ -248,9 +274,10 @@ export function LayoutCanvas({ spec, selected, onSelect, onChange, onRemove, foc
     const handle = t.closest<SVGElement>('[data-handle]');
     const itemEl = t.closest<SVGElement>('[data-id]');
     const groupEl = t.closest<SVGElement>('[data-group]');
+    const stripEl = t.closest<SVGElement>('[data-strip]');
     const annEl = t.closest<SVGElement>('[data-ann]');
     if (handle) autoFit.current = false;
-    if (handle) return setDrag({ t: 'panel', edge: handle.dataset.handle as 'w' | 'd' | 'wd', p0: p, w0: lay.panel.width, d0: lay.panel.depth, w: lay.panel.width, d: lay.panel.depth });
+    if (handle) return setDrag({ t: 'panel', edge: handle.dataset.handle as 'w' | 'd' | 'wd', p0: p, w0: lay.panel.width, d0: D, w: lay.panel.width, d: D });
     if (itemEl) {
       const id = itemEl.dataset.id!;
       setSelAnn(null);
@@ -262,6 +289,12 @@ export function LayoutCanvas({ spec, selected, onSelect, onChange, onRemove, foc
       const ids = selSet.has(id) ? selected : [id];
       if (!selSet.has(id)) onSelect([id]);
       return startMove(e, ids, id, undefined, id);
+    }
+    if (stripEl) {
+      const g = spec.groups?.find((x) => x.id === stripEl.dataset.strip);
+      if (!g) return;
+      onSelect(g.members); // the "Ch n" tab on the rear wall: jump to the strip on the top panel
+      return onFace?.('top');
     }
     if (groupEl) {
       const g = spec.groups?.find((x) => x.id === groupEl.dataset.group);
@@ -283,7 +316,7 @@ export function LayoutCanvas({ spec, selected, onSelect, onChange, onRemove, foc
 
   const onMove = (e: RPointerEvent<SVGSVGElement>) => {
     const p = toMm(e);
-    if (coordRef.current) coordRef.current.textContent = `x ${p.x.toFixed(1)}  y ${p.y.toFixed(1)} mm`;
+    if (coordRef.current) coordRef.current.textContent = `x ${p.x.toFixed(1)}  y ${(rear ? D - p.y : p.y).toFixed(1)} mm`;
     moveHands(p);
     const d = dragRef.current;
     if (!d) return;
@@ -317,14 +350,19 @@ export function LayoutCanvas({ spec, selected, onSelect, onChange, onRemove, foc
         return;
       }
       case 'panel': {
-        const cs = cutoutsOf(spec);
-        const needW = Math.max(40, ...cs.map((c) => c.x + (c.d ?? c.w!) / 2 + EDGE_MIN));
-        const needD = Math.max(40, ...cs.map((c) => c.y + (c.d ?? c.h!) / 2 + EDGE_MIN));
+        const both = [...cutoutsOf(real, 'top'), ...cutoutsOf(real, 'rear')];
+        const t = real.layout!.panel.thickness;
+        const needW = Math.max(40, ...both.map((c) => c.x + (c.d ?? c.w!) / 2 + EDGE_MIN));
+        const needD = rear
+          ? Math.max(40, ...cutoutsOf(real, 'rear').map((c) => c.y + (c.d ?? c.h!) / 2 + t + 2))
+          : Math.max(40, ...cutoutsOf(real, 'top').map((c) => c.y + (c.d ?? c.h!) / 2 + EDGE_MIN));
         const step = grid || 1;
+        // rear: the handle is the TOP edge, so dragging up (negative y) makes the wall taller
+        const dd = rear ? -(p.y - d.p0.y) : p.y - d.p0.y;
         return setDrag({
           ...d,
           w: d.edge !== 'd' ? Math.max(needW, Math.ceil(snapTo(d.w0 + p.x - d.p0.x, step))) : d.w0,
-          d: d.edge !== 'w' ? Math.max(needD, Math.ceil(snapTo(d.d0 + p.y - d.p0.y, step))) : d.d0,
+          d: d.edge !== 'w' ? Math.max(needD, Math.ceil(snapTo(d.d0 + dd, step))) : d.d0,
         });
       }
     }
@@ -356,7 +394,8 @@ export function LayoutCanvas({ spec, selected, onSelect, onChange, onRemove, foc
       case 'erase':
         return d.gone.length ? onChange(editLayout(spec, (l) => (l.annotations = l.annotations.filter((a) => !d.gone.includes(a.id))))) : undefined;
       case 'panel':
-        return onChange(editLayout(spec, (l) => ((l.panel.width = d.w), (l.panel.depth = d.d))));
+        if (rear) setView((v) => ({ ...v, y: v.y - (d.d - d.d0) * v.k })); // the bottom edge stays where it is on screen
+        return emitReal(editLayout(real, (l) => ((l.panel.width = d.w), rear ? (l.panel.height = d.d) : (l.panel.depth = d.d))));
     }
   };
 
@@ -382,7 +421,7 @@ export function LayoutCanvas({ spec, selected, onSelect, onChange, onRemove, foc
     if (e.key === ' ' && e.target === e.currentTarget) return void ((spaceRef.current = true), e.preventDefault());
     const key = e.key.toLowerCase();
     const mod = e.metaKey || e.ctrlKey;
-    const tool_ = !mod && TOOLS.find((t) => t.key.toLowerCase() === key);
+    const tool_ = !mod && tools.find((t) => t.key.toLowerCase() === key);
     if (tool_) return setTool(tool_.id);
     if (mod && key === 'a') return void (e.preventDefault(), onSelect(items.map((i) => i.id)));
     if (key === '0' && !mod) return fit();
@@ -401,7 +440,10 @@ export function LayoutCanvas({ spec, selected, onSelect, onChange, onRemove, foc
   // ---- render ----
   const fs = clamp(8 / k, 2.2, 3.6); // screen-constant-ish label size, in mm
   const W = L.panel.width;
-  const D = L.panel.depth;
+  const tools = rear ? TOOLS.filter((t) => REAR_TOOLS.includes(t.id)) : TOOLS;
+  const dropMm = L.panel.frontHeight === undefined ? 0 : L.panel.height - L.panel.frontHeight;
+  const panelDrag = drag?.t === 'panel' && rear ? (drag.d - drag.d0) * k : 0; // rear: top edge moves, bottom edge stays
+  const ry = (y: number) => r2(rear ? D - y : y); // y as the spec states it (rear: up from the bottom)
   const hs = 9 / k;
   const cursor = tool === 'hand' || spaceRef.current ? 'grab' : tool === 'select' ? 'default' : tool === 'text' ? 'text' : 'crosshair';
   const annPick = tool === 'select' || tool === 'erase' || tool === 'text';
@@ -409,12 +451,36 @@ export function LayoutCanvas({ spec, selected, onSelect, onChange, onRemove, foc
   const annotations = lay.annotations.filter((a) => !goneAnn.has(a.id)).map((a) => (drag?.t === 'move' && drag.annDraft?.id === a.id ? drag.annDraft : a));
   const selBox = union(selected.flatMap((id) => (live === spec ? boxes.get(id) : boxOf(live, id)) ?? []));
   const prim = selected[0] ? L.placements[selected[0]] : undefined;
+  const hotOf = (el: Element | null): string | null => {
+    const id = el?.closest<SVGElement>('[data-id]')?.dataset.id;
+    if (id) return (rear ? ownerOfSlot(spec, id) : owner.get(id))?.id ?? null;
+    return el?.closest<SVGElement>('[data-group],[data-strip]')?.dataset.group ?? el?.closest<SVGElement>('[data-strip]')?.dataset.strip ?? null;
+  };
+
+  // rear wall: a column in the strip's colour behind each slot, and a "Ch n" tab above the wall that leads back to the strip
+  const slotBand = (id: string) => {
+    const g = ownerOfSlot(spec, id);
+    return <rect key={`band-${id}`} className={`slot-band${g && hot === g.id ? ' hot' : ''}`} x={L.placements[id]!.x - 18.5} y={0} width={37} height={D} fill={g?.color ?? '#8a8068'} pointerEvents="none" />;
+  };
+  const slotTab = (id: string) => {
+    const g = ownerOfSlot(spec, id);
+    const text = id.startsWith('master:') ? `Out · ${MODULE_SHORT[id.slice(7)] ?? ''}`.replace('Out · OUT ', 'Out · ') : g ? g.label : '';
+    const tabH = fs + 2.4;
+    const tabW = text.length * fs * 0.62 + 6;
+    return (
+      <g key={`tab-${id}`} className="gtab" data-strip={g?.id} transform={`translate(${L.placements[id]!.x - tabW / 2} ${-tabH - 0.8})`}>
+        <rect width={tabW} height={tabH} rx={1.6} fill={g?.color ?? '#8a8068'} />
+        <text x={3} y={tabH - 1.6} fontSize={fs}>{text}</text>
+        {g && <title>{`${g.label}: click to show the strip on the top panel`}</title>}
+      </g>
+    );
+  };
 
   return (
-    <section className="lc" aria-label="Panel layout">
+    <section className={`lc${rear ? ' rear' : ''}`} aria-label={rear ? 'Rear wall layout' : 'Panel layout'}>
       <div className="lc-bar" role="toolbar" aria-label="Layout tools">
         <div className="seg" role="group" aria-label="Tool">
-          {TOOLS.map((t) => (
+          {tools.map((t) => (
             <button key={t.id} type="button" aria-pressed={tool === t.id} aria-keyshortcuts={t.key} title={`${t.label} (${t.key})`} onClick={() => setTool(t.id)}>
               <Icon>{t.icon}</Icon>
               <span>{t.label}</span>
@@ -429,10 +495,10 @@ export function LayoutCanvas({ spec, selected, onSelect, onChange, onRemove, foc
           ))}
           <span className="lc-unit" aria-hidden>mm</span>
         </div>
-        <button type="button" className="btn lc-btn" aria-pressed={hands} title="Show a palm-wide circle under the pointer to judge what one hand can reach" onClick={() => setHands((v) => !v)}>
+        {!rear && <button type="button" className="btn lc-btn" aria-pressed={hands} title="Show a palm-wide circle under the pointer to judge what one hand can reach" onClick={() => setHands((v) => !v)}>
           <Icon><path d="M8 12V6a1.5 1.5 0 013 0v5m0-6a1.5 1.5 0 013 0v6m0-4a1.5 1.5 0 013 0v6.5a6 6 0 01-6 6h-.5a5.5 5.5 0 01-4.4-2.2L4.5 14a1.5 1.5 0 012.3-1.8L8 13.5" /></Icon>
           Hands
-        </button>
+        </button>}
         <div className="seg lc-align" role="group" aria-label="Align and distribute selection">
           {ALIGNS.map((a) => (
             <button key={a.id} type="button" disabled={selected.length < 2} title={a.label} aria-label={a.label} onClick={() => arrange(alignPlacements(selected, boxes, a.id))}>
@@ -446,7 +512,7 @@ export function LayoutCanvas({ spec, selected, onSelect, onChange, onRemove, foc
             <Icon><path d="M3 4h18M3 20h18M8 9h8v6H8z" /></Icon>
           </button>
         </div>
-        <button type="button" className="btn lc-btn" title="Place everything again from the groups (undo with Ctrl/⌘ Z)" onClick={() => onChange({ ...spec, layout: autoLayout(spec) })}>
+        <button type="button" className="btn lc-btn" title="Place everything again from the groups (undo with Ctrl/⌘ Z)" onClick={() => emitReal({ ...real, layout: autoLayout(real) })}>
           Auto-arrange
         </button>
         <span className="lc-spacer" />
@@ -457,33 +523,48 @@ export function LayoutCanvas({ spec, selected, onSelect, onChange, onRemove, foc
         </div>
       </div>
 
-      <div ref={wrap} className="lc-wrap" tabIndex={-1} style={{ cursor }} onKeyDown={wrapKey} onKeyUp={(e) => e.key === ' ' && (spaceRef.current = false)} aria-describedby="lc-help">
+      <div ref={wrap} className="lc-wrap" tabIndex={-1} style={{ cursor }} onKeyDown={wrapKey} onKeyUp={(e) => e.key === ' ' && (spaceRef.current = false)} aria-describedby={`${uid}-help`}>
         <svg
           ref={svgRef}
           className={`lc-svg tool-${tool}`}
           role="group"
-          aria-label="Control panel, top view. Each control is a button: Tab to reach it, arrow keys to nudge."
+          aria-label={rear ? 'Rear wall, seen from above. Each part is a button: Tab to reach it, arrow keys to nudge.' : 'Control panel, top view. Each control is a button: Tab to reach it, arrow keys to nudge.'}
           onPointerDown={onDown}
           onPointerMove={onMove}
           onPointerUp={onUp}
           onPointerCancel={() => setDrag(null)}
-          onPointerLeave={() => !dragRef.current && moveHands(null)}
+          onPointerLeave={() => !dragRef.current && (moveHands(null), onHot?.(null))}
+          onPointerOver={(e) => onHot && !dragRef.current && onHot(hotOf(e.target as Element))}
           onContextMenu={(e) => e.preventDefault()}
         >
           <defs>
-            <pattern id="lc-minor" width={grid || 1} height={grid || 1} patternUnits="userSpaceOnUse"><path d={`M${grid || 1} 0H0V${grid || 1}`} className="lc-gline" /></pattern>
-            <pattern id="lc-major" width="10" height="10" patternUnits="userSpaceOnUse"><path d="M10 0H0V10" className="lc-gline major" /></pattern>
-            <clipPath id="lc-clip"><rect width={W} height={D} rx={L.panel.cornerRadius} /></clipPath>
+            <pattern id={`${uid}-minor`} width={grid || 1} height={grid || 1} patternUnits="userSpaceOnUse"><path d={`M${grid || 1} 0H0V${grid || 1}`} className="lc-gline" /></pattern>
+            <pattern id={`${uid}-major`} width="10" height="10" patternUnits="userSpaceOnUse"><path d="M10 0H0V10" className="lc-gline major" /></pattern>
+            <clipPath id={`${uid}-clip`}><rect width={W} height={D} rx={rear ? 0 : L.panel.cornerRadius} /></clipPath>
           </defs>
-          <g transform={`translate(${view.x} ${view.y}) scale(${k})`}>
-            <rect className="lc-plate" width={W} height={D} rx={L.panel.cornerRadius} />
-            <g clipPath="url(#lc-clip)" pointerEvents="none">
-              {grid > 0 && (grid || 1) * k >= 5 && <rect width={W} height={D} fill="url(#lc-minor)" />}
-              <rect width={W} height={D} fill="url(#lc-major)" />
+          <g transform={`translate(${view.x} ${view.y - panelDrag}) scale(${k})`}>
+            <rect className="lc-plate" width={W} height={D} rx={rear ? 0 : L.panel.cornerRadius} />
+            <g clipPath={`url(#${uid}-clip)`} pointerEvents="none">
+              {grid > 0 && (grid || 1) * k >= 5 && <rect width={W} height={D} fill={`url(#${uid}-minor)`} />}
+              <rect width={W} height={D} fill={`url(#${uid}-major)`} />
             </g>
-            <rect className="lc-safe" x={EDGE_MIN} y={EDGE_MIN} width={Math.max(0, W - 2 * EDGE_MIN)} height={Math.max(0, D - 2 * EDGE_MIN)} rx={Math.max(0, L.panel.cornerRadius - EDGE_MIN)} />
-
-            {(spec.groups ?? []).map((g) => groupFrame(g, live, fs, k, selected))}
+            {rear ? (
+              <>
+                <g className="lc-bands" pointerEvents="none">
+                  <rect x={0} y={0} width={W} height={L.panel.thickness} />
+                  <rect x={0} y={D - L.panel.thickness} width={W} height={L.panel.thickness} />
+                  <rect x={0} y={0} width={L.panel.cornerRadius} height={D} />
+                  <rect x={W - L.panel.cornerRadius} y={0} width={L.panel.cornerRadius} height={D} />
+                </g>
+                <rect className="lc-safe" x={EDGE_MIN} y={L.panel.thickness + 2} width={Math.max(0, W - 2 * EDGE_MIN)} height={Math.max(0, D - 2 * L.panel.thickness - 4)} />
+                {items.filter((it) => it.kind === 'slot').map((it) => slotBand(it.id))}
+              </>
+            ) : (
+              <>
+                <rect className="lc-safe" x={EDGE_MIN} y={EDGE_MIN} width={Math.max(0, W - 2 * EDGE_MIN)} height={Math.max(0, D - 2 * EDGE_MIN)} rx={Math.max(0, L.panel.cornerRadius - EDGE_MIN)} />
+                {(spec.groups ?? []).map((g) => groupFrame(g, live, fs, k, selected, hot === g.id))}
+              </>
+            )}
 
             {items.map((it) => {
               const p = L.placements[it.id]!;
@@ -495,6 +576,8 @@ export function LayoutCanvas({ spec, selected, onSelect, onChange, onRemove, foc
               const round = it.kind !== 'meter' && fp.cap.shape === 'circle' && fp.cutout.shape === 'circle';
               const rot = p.rotation ?? 0;
               const halo = halos.get(it.id);
+              const slot = it.kind === 'slot';
+              const sOwner = slot ? ownerOfSlot(spec, it.id) : undefined;
               return (
                 <g
                   key={it.id}
@@ -504,29 +587,33 @@ export function LayoutCanvas({ spec, selected, onSelect, onChange, onRemove, foc
                   tabIndex={0}
                   role="button"
                   aria-pressed={on}
-                  aria-label={`${it.label}, ${KIND_NOUN[it.kind]}${g ? `, in ${g.label}` : ''}, at ${p.x.toFixed(1)} by ${p.y.toFixed(1)} millimetres${halo ? (halo === 'error' ? ', has a problem' : ', is tight') : ''}`}
+                  aria-label={`${it.label}, ${KIND_NOUN[it.kind]}${g || sOwner ? `, ${slot ? 'for' : 'in'} ${(g ?? sOwner)!.label}` : ''}, at ${p.x.toFixed(1)} by ${ry(p.y).toFixed(1)} millimetres${halo ? (halo === 'error' ? ', has a problem' : ', is tight') : ''}`}
                   onKeyDown={(e) => itemKey(e, it.id)}
                 >
                   {halo && (round ? <circle className={`halo ${halo}`} r={b.w / 2 + 1.8} /> : <rect className={`halo ${halo}`} x={-b.w / 2 - 1.8} y={-b.h / 2 - 1.8} width={b.w + 3.6} height={b.h + 3.6} rx={3} />)}
                   {round ? <circle className="occ" r={b.w / 2} /> : <rect className="occ" x={-b.w / 2} y={-b.h / 2} width={b.w} height={b.h} rx={1.5} />}
-                  {cut && (cut.shape === 'circle' ? <circle className="cut" r={cut.d! / 2} style={g?.color ? { stroke: g.color } : undefined} /> : <rect className="cut" x={-cut.w! / 2} y={-cut.h! / 2} width={cut.w} height={cut.h} rx={cut.shape === 'slot' ? Math.min(cut.w!, cut.h!) / 2 : 0.6} style={g?.color ? { stroke: g.color } : undefined} />)}
-                  <g transform={`rotate(${rot})`} pointerEvents="none">{cap(it, fp)}</g>
+                  {slot && <g pointerEvents="none"><ModulePlate moduleId={moduleIdOf(spec, it.id)} labels={k >= 2.2} /></g>}
+                  {!slot && cut && (cut.shape === 'circle' ? <circle className="cut" r={cut.d! / 2} style={g?.color ? { stroke: g.color } : undefined} /> : <rect className="cut" x={-cut.w! / 2} y={-cut.h! / 2} width={cut.w} height={cut.h} rx={cut.shape === 'slot' ? Math.min(cut.w!, cut.h!) / 2 : 0.6} style={g?.color ? { stroke: g.color } : undefined} />)}
+                  {!slot && <g transform={`rotate(${rot})`} pointerEvents="none">{cap(it, fp)}</g>}
                   <title>{it.label}</title>
                 </g>
               );
             })}
+
+            {rear && items.filter((it) => it.kind === 'slot').map((it) => slotTab(it.id))}
 
             <g className="labels" pointerEvents="none">
               {items.map((it) => {
                 const p = L.placements[it.id]!;
                 const b = boxOf(live, it.id)!;
                 const fp = PARTS[it.part]!.footprint!;
+                if (it.kind === 'slot') return <text key={it.id} className="lbl mod" x={p.x} y={p.y + b.h / 2 + fs * 0.95} fontSize={fs} textAnchor="middle">{it.label}</text>;
                 const inside = it.kind === 'button' && (fp.cap.shape === 'circle' ? fp.cap.d : Math.min(fp.cap.w, fp.cap.h)) >= 12; // big enough to carry its own name
                 return <text key={it.id} className={`lbl${inside ? ' in' : ''}`} x={p.x} y={p.y + (inside ? fs * 0.35 : b.h / 2 + fs * 0.95)} fontSize={fs} textAnchor="middle">{it.label}</text>;
               })}
             </g>
 
-            <g className={`anns${annPick ? '' : ' off'}`}>
+            {!rear && <g className={`anns${annPick ? '' : ' off'}`}>
               {annotations.map((a) => {
                 const on = a.id === selAnn;
                 if (a.kind === 'stroke') {
@@ -549,15 +636,21 @@ export function LayoutCanvas({ spec, selected, onSelect, onChange, onRemove, foc
               })}
               {drag?.t === 'pen' && <polyline className="ann-line live" points={drag.points.map((q) => q.join(',')).join(' ')} />}
               {drag?.t === 'rect' && <rect className="ann-rect live" x={Math.min(drag.a.x, drag.b.x)} y={Math.min(drag.a.y, drag.b.y)} width={Math.abs(drag.a.x - drag.b.x)} height={Math.abs(drag.a.y - drag.b.y)} />}
-            </g>
+            </g>}
 
             {drag?.t === 'move' && drag.guides.map((g, i) => (g.axis === 'x' ? <line key={i} className="guide" x1={g.at} x2={g.at} y1={g.from} y2={g.to} /> : <line key={i} className="guide" y1={g.at} y2={g.at} x1={g.from} x2={g.to} />))}
             {drag?.t === 'marquee' && <rect className="marquee" x={Math.min(drag.a.x, drag.b.x)} y={Math.min(drag.a.y, drag.b.y)} width={Math.abs(drag.a.x - drag.b.x)} height={Math.abs(drag.a.y - drag.b.y)} />}
 
             <g className="handles">
-              <rect data-handle="w" className="handle" x={W - hs / 2} y={D / 2 - hs * 1.4} width={hs} height={hs * 2.8} rx={hs / 3}><title>Drag to change the panel width</title></rect>
-              <rect data-handle="d" className="handle" x={W / 2 - hs * 1.4} y={D - hs / 2} width={hs * 2.8} height={hs} rx={hs / 3}><title>Drag to change the panel depth</title></rect>
-              <rect data-handle="wd" className="handle corner" x={W - hs / 2} y={D - hs / 2} width={hs} height={hs} rx={hs / 3}><title>Drag to resize the panel</title></rect>
+              <rect data-handle="w" className="handle" x={W - hs / 2} y={D / 2 - hs * 1.4} width={hs} height={hs * 2.8} rx={hs / 3}><title>Drag to change the width</title></rect>
+              {rear ? (
+                <rect data-handle="d" className="handle" x={W / 2 - hs * 1.4} y={-hs / 2} width={hs * 2.8} height={hs} rx={hs / 3}><title>Drag the top edge to change the enclosure height</title></rect>
+              ) : (
+                <>
+                  <rect data-handle="d" className="handle" x={W / 2 - hs * 1.4} y={D - hs / 2} width={hs * 2.8} height={hs} rx={hs / 3}><title>Drag to change the panel depth</title></rect>
+                  <rect data-handle="wd" className="handle corner" x={W - hs / 2} y={D - hs / 2} width={hs} height={hs} rx={hs / 3}><title>Drag to resize the panel</title></rect>
+                </>
+              )}
             </g>
 
             <g ref={handsRef} className="hands" style={{ display: 'none' }} pointerEvents="none">
@@ -566,8 +659,9 @@ export function LayoutCanvas({ spec, selected, onSelect, onChange, onRemove, foc
               <text ref={handsText} y={HAND_D / 2 + 5 / k + 2} fontSize={11 / k} textAnchor="middle" />
             </g>
           </g>
-          <Rulers view={view} size={size} W={W} D={D} />
+          <Rulers view={{ ...view, y: view.y - panelDrag }} size={size} W={W} D={D} up={rear} />
         </svg>
+        {rear && <Wedge panel={L.panel} drop={dropMm} />}
 
         {textEdit && (
           <input
@@ -586,8 +680,8 @@ export function LayoutCanvas({ spec, selected, onSelect, onChange, onRemove, foc
             onBlur={() => finishText(true)}
           />
         )}
-        <p id="lc-help" className="sr-only">
-          Tab moves between controls. Arrow keys nudge the selected controls by the grid step, Shift by 10 millimetres, Alt by a tenth. Enter selects; Shift plus Enter adds to the selection. Delete removes. Double-click a control to select its whole group.
+        <p id={`${uid}-help`} className="sr-only">
+          Tab moves between controls. Arrow keys nudge the selected controls by the grid step, Shift by 10 millimetres, Alt by a tenth. Enter selects; Shift plus Enter adds to the selection. Delete removes. Double-click a control to select its whole group.{rear ? ' On the rear wall each slot belongs to the strip named on its tab.' : ''}
         </p>
       </div>
 
@@ -595,8 +689,10 @@ export function LayoutCanvas({ spec, selected, onSelect, onChange, onRemove, foc
         <span ref={coordRef} className="lc-coord">x –  y – mm</span>
         <span className="lc-sel">
           {selBox && selected.length > 0
-            ? `${selected.length} selected · ${selBox.w.toFixed(1)} × ${selBox.h.toFixed(1)} mm${selected.length === 1 && prim ? ` · at ${prim.x.toFixed(1)}, ${prim.y.toFixed(1)}` : ''}`
-            : `Panel ${W} × ${D} mm · ${items.length} placed`}
+            ? `${selected.length} selected · ${selBox.w.toFixed(1)} × ${selBox.h.toFixed(1)} mm${selected.length === 1 && prim ? ` · at ${prim.x.toFixed(1)}, ${ry(prim.y).toFixed(1)}` : ''}`
+            : rear
+              ? `Rear wall ${W} × ${D} mm · ${items.length} parts${dropMm > 0 ? ` · front ${L.panel.frontHeight} mm` : ''}`
+              : `Panel ${W} × ${D} mm · ${items.length} placed`}
         </span>
         <span className={`lc-health${problems.err ? ' bad' : problems.warn ? ' tight' : ''}`}>
           <i aria-hidden />
@@ -636,7 +732,7 @@ function cap(it: { kind: string; label: string; led?: { color: string }; count?:
   );
 }
 
-function groupFrame(g: Group, spec: DeviceSpec, fs: number, k: number, selected: string[]): ReactNode {
+function groupFrame(g: Group, spec: DeviceSpec, fs: number, k: number, selected: string[], hot = false): ReactNode {
   const bb = groupBBox(spec, g.id, GROUP_PAD);
   if (!bb) return null;
   const col = g.color ?? '#8a8068';
@@ -644,8 +740,8 @@ function groupFrame(g: Group, spec: DeviceSpec, fs: number, k: number, selected:
   const tabH = fs + 2.4;
   const tabW = g.label.length * fs * 0.62 + 6;
   return (
-    <g key={g.id} className={`lc-gframe${on ? ' on' : ''}`}>
-      <rect x={bb.x} y={bb.y} width={bb.w} height={bb.h} rx={3} fill={col} fillOpacity={on ? 0.14 : 0.07} pointerEvents="none" />
+    <g key={g.id} className={`lc-gframe${on ? ' on' : ''}${hot ? ' hot' : ''}`}>
+      <rect x={bb.x} y={bb.y} width={bb.w} height={bb.h} rx={3} fill={col} fillOpacity={on || hot ? 0.16 : 0.07} pointerEvents="none" />
       <rect className="gline" x={bb.x} y={bb.y} width={bb.w} height={bb.h} rx={3} stroke={col} />
       <rect className="ghit" data-group={g.id} x={bb.x} y={bb.y} width={bb.w} height={bb.h} rx={3} />
       <g className="gtab" data-group={g.id} transform={`translate(${bb.x} ${bb.y - tabH})`}>
@@ -677,13 +773,14 @@ function haloMap(spec: DeviceSpec, issues: Issue[], items: { id: string; label: 
   return out;
 }
 
-function Rulers({ view, size, W, D }: { view: View; size: { w: number; h: number }; W: number; D: number }) {
+function Rulers({ view, size, W, D, up }: { view: View; size: { w: number; h: number }; W: number; D: number; up?: boolean }) {
   const minor = NICE.find((s) => s * view.k >= 8) ?? 100;
   const major = NICE.find((s) => s * view.k >= 56) ?? 100;
-  const ticks = (len: number, off: number, extent: number) => {
+  // up: values count upwards from the bottom edge (rear wall heights)
+  const ticks = (len: number, off: number, extent: number, flip = false) => {
     const out: { v: number; px: number; big: boolean }[] = [];
     for (let v = 0; v <= len; v += minor) {
-      const px = off + v * view.k;
+      const px = flip ? off - v * view.k : off + v * view.k;
       if (px > 18 && px < extent) out.push({ v, px, big: v % major === 0 });
     }
     return out;
@@ -698,12 +795,34 @@ function Rulers({ view, size, W, D }: { view: View; size: { w: number; h: number
           {t.big && <text x={t.px + 3} y={9}>{t.v}</text>}
         </g>
       ))}
-      {ticks(D, view.y, size.h).map((t) => (
+      {(up ? ticks(D, view.y + D * view.k, size.h, true) : ticks(D, view.y, size.h)).map((t) => (
         <g key={`y${t.v}`}>
           <line y1={t.px} y2={t.px} x1={t.big ? 6 : 12} x2={18} />
           {t.big && <text transform={`translate(9 ${t.px - 3}) rotate(-90)`}>{t.v}</text>}
         </g>
       ))}
     </g>
+  );
+}
+
+/** Side profile of the enclosure: how the rear wall height relates to the sloping top panel. */
+function Wedge({ panel, drop }: { panel: { depth: number; height: number; frontHeight?: number }; drop: number }) {
+  const H = panel.height;
+  const F = panel.frontHeight ?? H;
+  const D = Math.sqrt(Math.max(1, panel.depth ** 2 - drop ** 2));
+  const W = 156;
+  const Hh = 70;
+  const sc = Math.min((W - 44) / D, (Hh - 28) / H);
+  const x0 = 14;
+  const yb = Hh - 8;
+  const pts = [[x0, yb], [x0, yb - H * sc], [x0 + D * sc, yb - F * sc], [x0 + D * sc, yb]].map((q) => q.join(',')).join(' ');
+  const deg = drop > 0 ? Math.round((Math.asin(Math.min(1, drop / panel.depth)) * 180) / Math.PI * 10) / 10 : 0;
+  return (
+    <svg className="lc-wedge" width={W} height={Hh} viewBox={`0 0 ${W} ${Hh}`} role="img" aria-label={drop > 0 ? `Side view: rear ${H} mm, front ${F} mm, slope ${deg} degrees` : `Side view: flat top, ${H} mm`}>
+      <polygon points={pts} />
+      <text x={x0 - 4} y={yb - H * sc - 3} textAnchor="start">rear {H}</text>
+      {drop > 0 && <text x={x0 + D * sc + 3} y={yb - F * sc + 8} textAnchor="start">front {F}</text>}
+      <text x={x0 + 4} y={yb - 3} className="dim">{drop > 0 ? `${deg}° slope` : 'flat'}</text>
+    </svg>
   );
 }
