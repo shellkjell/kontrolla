@@ -101,3 +101,23 @@ export function boardUse(spec: DeviceSpec, boardId = spec.audio?.board ?? ''): B
   const total = spec.audio.channels.reduce((s, ch) => s + (IO_MODULES[spec.ioSlots?.find((x) => x.id === ch.slot)?.module ?? '']?.codecPorts ?? 2), 0);
   return { board: boardId, inputsUsed: total, inputsMax: b.inputs, channels: spec.audio.channels.length, channelsMax: b.stereoChannels, over: total > b.inputs, overflow };
 }
+
+/** What a module swap did, in a sentence: "Ch 5 now takes Dual XLR mic / line input · 11 of 12 codec inputs in use · its A/B button now does nothing". */
+export function describeSwap(before: DeviceSpec, after: DeviceSpec): { id: string; text: string } | undefined {
+  const slot = after.ioSlots?.find((s) => before.ioSlots?.find((b) => b.id === s.id)?.module !== s.module);
+  if (slot) {
+    const m = IO_MODULES[slot.module];
+    const owner = ownerOfSlot(after, slot.id);
+    const use = boardUse(after);
+    const ab = after.audio?.channels.find((c) => c.slot === slot.id)?.bind.inputSelect;
+    const bits = [`${owner?.label ?? slot.id} now takes ${m?.name ?? slot.module}`];
+    if (use) bits.push(`${use.inputsUsed} of ${use.inputsMax} codec inputs in use`);
+    if (ab && m && !m.selectable) bits.push('its A/B button now does nothing');
+    return { id: slot.id, text: bits.join(' · ') };
+  }
+  const was = before.audio?.master.outputs ?? [];
+  const now = after.audio?.master.outputs ?? [];
+  const added = now.find((m) => !was.includes(m));
+  if (added && was.length === now.length) return { id: `master:${added}`, text: `Master output now ${IO_MODULES[added]?.name ?? added}` };
+  return undefined;
+}

@@ -1,16 +1,31 @@
-/* Design page: view switch, grouped control list, split layout. */
-.viewbar { display: flex; align-items: center; gap: 8px; margin-bottom: 10px; }
-.viewbar-sp { flex: 1; }
-.viewbar .btn.ghost { padding: 0 8px; font-size: 13px; }
+/* Design page. Three columns on a laptop: parts | drawing | what is selected. Narrower: the parts list becomes a drawer,
+   and under 900 px the selection becomes a bottom sheet under the drawing. Everything uses the app tokens. */
+.dsg-root { display: grid; grid-template-columns: 264px minmax(0, 1fr) 344px; gap: 20px; align-items: start; }
+.dsg-root.drawer-rack { grid-template-columns: minmax(0, 1fr) 344px; }
+.dsg-root.sheeted { grid-template-columns: minmax(0, 1fr); }
 
-.views { display: grid; gap: 12px; margin-bottom: 16px; min-width: 0; }
-.views.split { grid-template-columns: repeat(2, minmax(0, 1fr)); }
-.dsg-inspector { display: flex; flex-direction: column; gap: 14px; min-width: 0; }
+.dsg-rack, .dsg-side { position: sticky; top: 56px; display: flex; flex-direction: column; gap: 12px; max-height: calc(100vh - 68px); overflow: auto; padding-right: 6px; scrollbar-width: thin; scrollbar-color: var(--line2) transparent; }
+.dsg-stage { min-width: 0; }
 
-/* split gives the stage two columns' worth of room; the check panel drops underneath */
-.design.wide { grid-template-columns: 250px minmax(0, 1fr); }
-.design.wide .check { grid-column: 1 / -1; position: static; max-height: none; display: grid; grid-template-columns: 1.4fr 1fr; gap: 24px; align-items: start; }
-@media (max-width: 1100px) { .views.split { grid-template-columns: minmax(0, 1fr); } }
+/* parts column */
+.dsg-rack-head { display: none; align-items: center; justify-content: space-between; }
+.dsg-rack-head h2 { font: 700 16px var(--sans); }
+.dsg-device { display: flex; flex-direction: column; gap: 4px; }
+.dsg-device label { font: 500 12px var(--sans); color: var(--dim); }
+.dsg-device label:not(:first-child) { margin-top: 6px; }
+.dsg-tabs { display: flex; border-bottom: 1px solid var(--line2); }
+.dsg-tabs button { position: relative; flex: 1; background: none; border: 0; border-bottom: 2px solid transparent; margin-bottom: -1px; padding: 6px 4px; font-weight: 500; color: var(--dim); }
+.dsg-tabs button:hover { color: var(--ink); }
+.dsg-tabs button[aria-selected='true'] { color: var(--ink); border-bottom-color: var(--ink); font-weight: 650; }
+.dsg-tabflag { display: inline-block; width: 7px; height: 7px; margin-left: 6px; border-radius: 1px; background: var(--err); vertical-align: 1px; }
+.dsg-tabbody { display: flex; flex-direction: column; gap: 10px; }
+.dsg-add { display: flex; flex-direction: column; gap: 6px; }
+.dsg-add-head { display: flex; align-items: center; justify-content: space-between; font: 500 12px var(--sans); color: var(--dim); }
+.dsg-add-head .seg button { min-height: 24px; padding: 0 8px; font: 500 12px var(--mono); }
+.dsg-listhead { display: flex; align-items: baseline; justify-content: space-between; border-top: 1px solid var(--ink); padding-top: 6px; }
+.dsg-listhead h3 { font: 650 13px var(--sans); }
+.dsg-listhead .link { font-size: 12px; }
+.dsg-mux { margin-top: 4px; }
 
 /* grouped control list */
 .rows .gsec { margin-top: 8px; }
@@ -30,6 +45,84 @@
 
 .glyph.slotplate { width: 9px; height: 16px; margin: 0 2.5px; border-radius: 1px; background: #30343b; box-shadow: inset 0 0 0 1px #6c727a, inset 0 5px 0 -3px #b8bcc2, inset 0 -5px 0 -3px #b8bcc2; }
 
+
+/* stage */
+.viewbar { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; margin-bottom: 10px; }
+.dsg-root .dsg-railbtn { display: none; }
+.dsg-scrim { display: none; }
+.views { display: grid; gap: 12px; min-width: 0; }
+.views.split { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+
+.dsg-start { border: 1px dashed var(--line2); border-radius: var(--r); padding: 48px 28px; display: flex; flex-direction: column; align-items: flex-start; gap: 10px; }
+.dsg-start h2 { font: 700 22px/1.15 var(--sans); font-variation-settings: var(--wide); letter-spacing: -0.01em; }
+.dsg-start p { color: var(--dim); max-width: 52ch; }
+.dsg-quick { display: flex; flex-wrap: wrap; gap: 8px; margin: 6px 0 4px; }
+
+.dsg-tip { display: flex; align-items: center; justify-content: space-between; gap: 16px; margin-bottom: 10px; padding: 8px 12px; background: var(--card); border: 1px solid var(--line2); border-left: 3px solid var(--signal); border-radius: var(--r); font-size: 13px; }
+.dsg-tip-n { display: inline-block; margin-right: 8px; font: 500 11px var(--mono); color: var(--faint); }
+.dsg-tip-actions { display: flex; gap: 4px; flex: none; }
+
+/* the bar under the drawing: where you are, and the way on */
+.dsg-bar { position: sticky; bottom: 0; z-index: 6; display: flex; align-items: center; gap: 12px; margin-top: 12px; padding: 10px 0; background: var(--bg); border-top: 1px solid var(--line2); }
+.dsg-root .dsg-sheetbtn { display: none; max-width: 46%; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.dsg-state { flex: 1; display: inline-flex; align-items: center; gap: 8px; font-size: 13px; color: var(--dim); }
+.dsg-state i, .dsg-check-btn i { width: 8px; height: 8px; border-radius: 1px; background: var(--ok); flex: none; }
+.dsg-state.tight i, .dsg-check-btn.tight i { background: var(--warn); }
+.dsg-state.bad i, .dsg-check-btn.bad i { background: var(--err); }
+
+/* right column: check, then what is selected */
+.dsg-sheet-head { display: none; align-items: center; justify-content: space-between; }
+.dsg-sheet-head h2 { font: 700 16px var(--sans); }
+.dsg-check { border-top: 2px solid var(--ink); }
+.dsg-check-btn { width: 100%; display: flex; align-items: center; gap: 8px; padding: 8px 0; background: none; border: 0; text-align: left; }
+.dsg-check-btn span { font: 12px var(--mono); color: var(--faint); }
+.dsg-check-btn em { margin-left: auto; font-style: normal; font-size: 12px; color: var(--dim); }
+.dsg-check .issues { border-top: 0; padding-top: 0; }
+.dsg-check .issues > header { display: none; }
+.dsg-inspector { display: flex; flex-direction: column; gap: 14px; min-width: 0; }
+.dsg-empty { border: 1px dashed var(--line2); border-radius: var(--r); padding: 18px 16px; display: flex; flex-direction: column; gap: 6px; }
+.dsg-empty h2 { font: 650 15px var(--sans); }
+.dsg-empty p { color: var(--dim); font-size: 13px; }
+.dsg-pins summary { cursor: pointer; font: 650 13px var(--sans); padding: 6px 0; border-top: 1px solid var(--line2); }
+.dsg-pins summary small { font: 400 12px var(--sans); color: var(--faint); margin-left: 6px; }
+.dsg-pins ul { list-style: none; margin: 0; padding: 0; font: 12px var(--mono); }
+.dsg-pins li { display: flex; justify-content: space-between; gap: 12px; padding: 3px 0; border-bottom: 1px solid var(--line); }
+.dsg-pins b { font-weight: 600; }
+.dsg-pins span { color: var(--dim); text-align: right; }
+
+/* the inspector is narrow: cards that were laid out for a wide stage stack */
+.dsg-side .io-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+.dsg-side .io-tile { grid-template-columns: 26px 1fr; column-gap: 8px; padding: 6px; }
+.dsg-side .io-tile .mp-svg { width: 26px; height: 65px; }
+.dsg-side .io-detail dl div { grid-template-columns: 1fr; gap: 0; }
+.dsg-side .editor .grid { grid-template-columns: repeat(auto-fill, minmax(140px, 1fr)); }
+.dsg-side .gp.compact header { min-width: 0; }
+.dsg-side .gp-dup input { width: 64px; }
+
+/* messages from actions that change a lot */
+.dsg-toast { position: fixed; top: 56px; left: 50%; translate: -50% 0; z-index: 60; display: flex; align-items: center; gap: 6px 16px; flex-wrap: wrap; max-width: min(560px, 92vw); padding: 10px 14px; background: var(--ink); color: var(--bg); border-radius: var(--r); font-size: 13px; }
+.dsg-toast .link { color: inherit; font-weight: 600; }
+
+/* parts list as a drawer (narrow screens, or split view on a laptop) */
+.dsg-root.drawer-rack .dsg-railbtn { display: inline-flex; }
+.dsg-rack.drawer { position: fixed; top: 44px; bottom: 0; left: 0; width: min(320px, 88vw); max-height: none; padding: 12px; background: var(--bg); border-right: 1px solid var(--ink); z-index: 41; transform: translateX(-102%); transition: transform 0.14s ease-out; }
+.dsg-rack.drawer.open { transform: none; }
+.dsg-rack.drawer .dsg-rack-head { display: flex; }
+.dsg-root.drawer-rack .dsg-scrim { display: block; position: fixed; inset: 44px 0 0 0; z-index: 40; border: 0; background: rgba(0, 0, 0, 0.35); }
+
+/* selection as a bottom sheet (phones, small tablets) */
+.dsg-root.sheeted .dsg-stage { padding-bottom: 64px; }
+.dsg-root.sheeted .dsg-bar { position: fixed; left: 0; right: 0; bottom: 0; padding: 8px 16px; z-index: 32; margin: 0; }
+.dsg-root.sheeted .dsg-sheetbtn { display: inline-flex; }
+.dsg-root.sheeted .dsg-state { display: none; }
+.dsg-root.sheeted .dsg-bar .btn.primary { margin-left: auto; }
+.dsg-root.sheeted .dsg-side { position: fixed; left: 0; right: 0; bottom: 52px; top: auto; max-height: 66vh; padding: 12px 16px 16px; background: var(--bg); border-top: 2px solid var(--ink); z-index: 31; transform: translateY(110%); transition: transform 0.14s ease-out; box-shadow: 0 -8px 24px rgba(0, 0, 0, 0.15); }
+.dsg-root.sheeted .dsg-side.open { transform: none; }
+.dsg-root.sheeted .dsg-sheet-head { display: flex; }
+.dsg-root.sheeted .dsg-toast { top: auto; bottom: 64px; }
+.dsg-root.sheeted .lc-wrap { height: clamp(340px, 58vh, 560px); }
+.dsg-root.sheeted .lc-hint { display: none; }
+
 /* top + rear canvases stacked; in split the 3D view takes the second column */
 .views.face-both { grid-template-columns: minmax(0, 1fr); }
 .views.split.face-both { grid-template-columns: repeat(2, minmax(0, 1fr)); }
@@ -39,3 +132,45 @@
   .views.split.face-both { grid-template-columns: minmax(0, 1fr); }
   .views.split.face-both .v3 { grid-column: auto; grid-row: auto; }
 }
+
+/* a plate that was just swapped */
+.item.flash .occ { animation: dsg-flash 0.5s ease-in-out 3; }
+@keyframes dsg-flash { 50% { fill: rgba(34, 64, 208, 0.35); stroke: var(--sel); stroke-width: 3; stroke-dasharray: none; } }
+@media (prefers-reduced-motion: reduce) { .item.flash .occ { animation: none; fill: rgba(34, 64, 208, 0.3); stroke: var(--sel); } .dsg-rack.drawer, .dsg-root.sheeted .dsg-side { transition: none; } }
+
+/* toolbar popovers */
+.pop { position: relative; }
+.pop-btn { gap: 6px; }
+.pop-caret { font-size: 9px; color: var(--faint); }
+.pop-btn[aria-pressed='true'] .pop-caret { color: inherit; }
+.pop-dot { width: 6px; height: 6px; border-radius: 1px; background: var(--signal); }
+.pop-panel { position: absolute; top: calc(100% + 4px); z-index: 30; min-width: 240px; max-width: min(340px, 92vw); display: flex; flex-direction: column; gap: 10px; padding: 10px; background: var(--bg); border: 1px solid var(--ink); border-radius: var(--r); box-shadow: 0 8px 22px rgba(0, 0, 0, 0.2); }
+.pop-panel.start { left: 0; }
+.pop-panel.end { right: 0; }
+.pop-panel .help { font-size: 12px; }
+.pop-check { display: flex; gap: 8px; align-items: flex-start; font-size: 13px; }
+.pop-check small { display: block; color: var(--faint); font-size: 12px; }
+.pop-check input { margin-top: 3px; }
+.pop-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 6px; }
+.pop-grid .btn { justify-content: flex-start; font-size: 12px; padding: 0 8px; }
+.pop-keys { margin: 0; display: grid; gap: 4px; }
+.pop-keys div { display: grid; grid-template-columns: 9em 1fr; gap: 10px; font-size: 12px; }
+.pop-keys dt { font-family: var(--mono); color: var(--ink); }
+.pop-keys dd { margin: 0; color: var(--dim); }
+
+/* App's own toast must not sit on top of the phone bar */
+body:has(.dsg-root) .toast { bottom: 76px; }
+body:has(.dsg-root.sheeted) .toast { bottom: 68px; }
+
+/* fingers: bigger targets where the pointer is coarse */
+@media (pointer: coarse) {
+  .dsg-root .lc-bar .btn, .dsg-root .lc-bar .seg button, .dsg-root .viewbar .btn, .dsg-root .viewbar .seg button, .dsg-root .dsg-tabs button, .dsg-root .dsg-add-head .seg button, .dsg-root .dsg-bar .btn { min-height: 40px; }
+  .dsg-root .row { padding-top: 10px; padding-bottom: 10px; }
+}
+
+/* the strip bar above a part's settings, in a narrow column: header on one line, actions wrap under it */
+.dsg-side .gp.compact { flex-direction: column; align-items: stretch; gap: 6px; }
+.dsg-side .gp.compact header { flex-wrap: wrap; min-width: 0; }
+.dsg-side .gp.compact header > div:nth-child(2) { flex: 1 1 8em; }
+.dsg-side .gp.compact .gp-actions { flex-wrap: wrap; flex: 1 1 100%; }
+.dsg-side .gp.compact .gp-dup { flex-wrap: wrap; }

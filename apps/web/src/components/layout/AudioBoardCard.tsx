@@ -1,3 +1,4 @@
+import { useState } from 'react';
 import { AUDIO_BOARDS } from '@kontrolla/core';
 import type { DeviceSpec } from '@kontrolla/core';
 import { MaturityBadge } from './IoModuleCard';
@@ -8,7 +9,8 @@ const price = (id: string) => Math.round(AUDIO_BOARDS[id]!.bom.reduce((s, l) => 
 const PROVEN = Object.values(AUDIO_BOARDS).find((b) => b.maturity === 'proven')!;
 
 /** Sidebar card: which audio engine board the mixer uses, and what happens when the channels do not fit it. */
-export function AudioBoardCard({ spec, onChange }: { spec: DeviceSpec; onChange: (s: DeviceSpec) => void }) {
+export function AudioBoardCard({ spec, onChange, onSay }: { spec: DeviceSpec; onChange: (s: DeviceSpec) => void; onSay?: (text: string, undoTo?: DeviceSpec) => void }) {
+  const [confirm, setConfirm] = useState(false);
   const a = spec.audio;
   if (!a) return null;
   const cur = AUDIO_BOARDS[a.board];
@@ -50,12 +52,33 @@ export function AudioBoardCard({ spec, onChange }: { spec: DeviceSpec; onChange:
             The mixer has {use.channels} channels, but {cur?.name.split(' (')[0]} carries {use.channelsMax} stereo channels ({use.inputsMax} codec inputs).
             {use.overflow.length > 0 && <> {labels(use.overflow)} would have no input.</>}
           </p>
-          <div className="board-actions">
-            <button className="btn primary" onClick={() => onChange(fitBoard(spec, PROVEN.id))}>
-              Use the proven {PROVEN.stereoChannels}-channel board{fitsProven.overflow.length ? ` (drop ${labels(fitsProven.overflow)})` : ''}
-            </button>
-            <button className="btn" onClick={() => onChange(setBoard(spec, 'teensy41-cs42448x2'))} disabled={a.board === 'teensy41-cs42448x2'}>Keep experimental</button>
-          </div>
+          {confirm ? (
+            <>
+              <p>
+                <b>This removes {labels(fitsProven.overflow)}</b> with their controls and input plates, then lays the panel out again. You can undo it.
+              </p>
+              <div className="board-actions">
+                <button
+                  className="btn primary"
+                  onClick={() => {
+                    onChange(fitBoard(spec, PROVEN.id));
+                    onSay?.(`Switched to the proven board and removed ${labels(fitsProven.overflow)}.`, spec);
+                    setConfirm(false);
+                  }}
+                >
+                  Remove them
+                </button>
+                <button className="btn" onClick={() => setConfirm(false)}>Cancel</button>
+              </div>
+            </>
+          ) : (
+            <div className="board-actions">
+              <button className="btn primary" onClick={() => (fitsProven.overflow.length ? setConfirm(true) : onChange(fitBoard(spec, PROVEN.id)))}>
+                Use the proven {PROVEN.stereoChannels}-channel board{fitsProven.overflow.length ? ` (drops ${labels(fitsProven.overflow)})` : ''}
+              </button>
+              <button className="btn" onClick={() => onChange(setBoard(spec, 'teensy41-cs42448x2'))} disabled={a.board === 'teensy41-cs42448x2'}>Keep the experimental board</button>
+            </div>
+          )}
         </div>
       )}
     </section>

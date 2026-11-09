@@ -1,18 +1,15 @@
-import { Suspense, lazy, useEffect, useMemo, useState } from 'react';
-import { IO_MODULES, MCUS, ensureLayout, groupOf, validateAudio, validateLayout } from '@kontrolla/core';
-import type { Control, DeviceSpec, Group, Issue, McuId } from '@kontrolla/core';
-import { Editor, MeterEditor } from '../components/Editor';
-import { Glyph } from '../components/Glyph';
+import { Suspense, lazy, useEffect, useMemo, useRef, useState } from 'react';
+import { ensureLayout, validateAudio, validateLayout } from '@kontrolla/core';
+import type { Control, DeviceSpec, Issue } from '@kontrolla/core';
 import { Issues } from '../components/Issues';
-import { AudioBoardCard } from '../components/layout/AudioBoardCard';
-import { GroupPanel, SelectionCard } from '../components/layout/GroupPanel';
-import { IoModuleCard } from '../components/layout/IoModuleCard';
+import { CoachTips } from '../components/layout/CoachTips';
+import { Inspector } from '../components/layout/Inspector';
 import { LayoutCanvas } from '../components/layout/LayoutCanvas';
-import { addMasterModule, applyStripPattern, newMeter, removeItems, stripInfo } from '../components/layout/ops';
-import { MODULE_SHORT, faceOf, isSlotId, labelOf as placedLabel, ownerOfSlot, slotOfGroup } from '../components/layout/rear';
-import { noteName } from '../midi';
-import { labelOf, pinLabel, pinUsers, pinsOf } from '../pins';
-import { KIND_INFO, newControl, withMcu } from '../store';
+import { addMasterModule, mergeIssues, newMeter, removeItems } from '../components/layout/ops';
+import { Rack } from '../components/layout/Rack';
+import { describeSwap, faceOf, isSlotId, labelOf as placedLabel, virtualPart } from '../components/layout/rear';
+import { pinLabel, pinUsers } from '../pins';
+import { newControl } from '../store';
 import type { Kind } from '../store';
 import './design.css';
 
@@ -26,6 +23,9 @@ interface Props {
   setSpec: (s: DeviceSpec) => void;
   onNext: () => void;
   focusId?: string; // preselect (e.g. from Test's inspector)
+  /** Say what an action did. `undo: true` means App's own undo takes the action back. Without it Design shows its own note. */
+  notify?: (text: string, opts?: { undo?: boolean }) => void;
+  status?: unknown; // the app-wide readiness model, once App passes one
 }
 
 type View = '2d' | '3d' | 'split';
@@ -36,61 +36,69 @@ const FACES: { id: FaceMode; label: string }[] = [
   { id: 'rear', label: 'Rear' },
   { id: 'both', label: 'Both' },
 ];
-const loadFace = (): FaceMode => {
-  try {
-    const v = localStorage.getItem(FACE_KEY);
-    if (v === 'top' || v === 'rear' || v === 'both') return v;
-  } catch {
-    // storage unavailable: default face
-  }
-  return 'top';
-};
 const VIEW_KEY = 'kontrolla.design.view';
 const VIEWS: { id: View; label: string }[] = [
-  { id: '2d', label: '2D layout' },
-  { id: '3d', label: '3D model' },
-  { id: 'split', label: 'Split' },
+  { id: '2d', label: 'Drawing' },
+  { id: '3d', label: '3D' },
+  { id: 'split', label: 'Drawing + 3D' },
 ];
-const loadView = (): View => {
+const read = <T extends string>(key: string, ok: T[], dflt: T): T => {
   try {
-    const v = localStorage.getItem(VIEW_KEY);
-    if (v === '2d' || v === '3d' || v === 'split') return v;
+    const v = localStorage.getItem(key) as T | null;
+    if (v && ok.includes(v)) return v;
   } catch {
-    // storage unavailable: default view
+    // storage unavailable: default
   }
-  return '2d';
+  return dflt;
+};
+const write = (key: string, v: string) => {
+  try {
+    localStorage.setItem(key, v);
+  } catch {
+    // the choice just won't stick
+  }
 };
 
-const mapText = (c: Control) => (c.midi.type === 'cc' ? `CC ${c.midi.cc}` : noteName(c.midi.note)) + ` · ch ${c.midi.channel}`;
-const numbers = (a: (number | undefined)[]) => a.filter((n): n is number => n !== undefined);
+/** Tracks a CSS media query, so layout choices that need state (a drawer open or closed) know which mode they are in. */
+function useMedia(q: string): boolean {
+  const [m, setM] = useState(() => window.matchMedia(q).matches);
+  useEffect(() => {
+    const mq = window.matchMedia(q);
+    const on = () => setM(mq.matches);
+    mq.addEventListener('change', on);
+    return () => mq.removeEventListener('change', on);
+  }, [q]);
+  return m;
+}
 
-export function Design({ spec, allocated, issues, setSpec, onNext, focusId }: Props) {
+const QUICK: { label: string; parts: [Kind, number, boolean?][] }[] = [
+  { label: '8 knobs', parts: [['pot', 8]] },
+  { label: '8 pads', parts: [['button', 8]] },
+  { label: '8 knobs and 8 pads', parts: [['pot', 8], ['button', 8]] },
+  { label: '4 faders', parts: [['fader', 4]] },
+];
+
+export function Design({ spec, allocated, issues, setSpec, onNext, focusId, notify }: Props) {
   const commit = setSpec; // App's setSpec is the one undoable funnel
   const [sel, setSel] = useState<string[]>(() => (focusId ? [focusId] : spec.controls[0] ? [spec.controls[0].id] : []));
-  const [view, setViewState] = useState<View>(loadView);
-  const [face, setFaceState] = useState<FaceMode>(loadFace);
+  const [view, setViewState] = useState<View>(() => read(VIEW_KEY, ['2d', '3d', 'split'], '2d'));
+  const [face, setFaceState] = useState<FaceMode>(() => read(FACE_KEY, ['top', 'rear', 'both'], 'top'));
   const [hot, setHot] = useState<string | null>(null);
-  const [open, setOpen] = useState<Record<string, boolean>>({});
   const [focus, setFocus] = useState<{ id: string; n: number; fit?: boolean }>();
-  const [note, setNote] = useState('');
-  const setFace = (f: FaceMode) => {
-    setFaceState(f);
-    try {
-      localStorage.setItem(FACE_KEY, f);
-    } catch {
-      // storage unavailable: the choice just won't stick
-    }
-  };
-  const setView = (v: View) => {
-    setViewState(v);
-    try {
-      localStorage.setItem(VIEW_KEY, v);
-    } catch {
-      // storage unavailable: the choice just won't stick
-    }
-  };
+  const [flash, setFlash] = useState<{ id: string; n: number }>();
+  const [rail, setRail] = useState(false); // parts list as a drawer on narrow screens
+  const [sheet, setSheet] = useState(false); // inspector as a bottom sheet on narrow screens
+  const [checkOpen, setCheckOpen] = useState<boolean | undefined>();
+  const [toast, setToast] = useState<{ text: string; undoTo?: DeviceSpec; n: number }>();
+  const toastTimer = useRef<ReturnType<typeof setTimeout>>(undefined);
+  const sheeted = useMedia('(max-width: 899px)');
+  const laptopNarrow = useMedia('(max-width: 1499px)');
+  const midNarrow = useMedia('(max-width: 1239px)');
+  const drawer = midNarrow || (view === 'split' && laptopNarrow); // not enough width for a parts column
+  const setFace = (f: FaceMode) => (setFaceState(f), write(FACE_KEY, f));
+  const setView = (v: View) => (setViewState(v), write(VIEW_KEY, v));
 
-  // Every design gets a panel layout the moment it is opened here; new controls get a seat automatically.
+  // Every design gets a panel layout the moment it is opened here; new parts get a seat automatically.
   const ensured = useMemo(() => ensureLayout(spec), [spec]);
   const needsLayout = !spec.layout || Object.keys(ensured.layout!.placements).length !== Object.keys(spec.layout.placements).length;
   useEffect(() => {
@@ -99,295 +107,227 @@ export function Design({ spec, allocated, issues, setSpec, onNext, focusId }: Pr
   const laid = needsLayout ? ensured : spec;
   const model = useMemo(() => (needsLayout ? ensureLayout(allocated) : allocated), [needsLayout, allocated]);
 
+  const total = spec.controls.length + (spec.meters?.length ?? 0);
+  const hasRear = Object.entries(laid.layout?.placements ?? {}).some(([id, p]) => p.face === 'rear' && id !== 'usb');
+  const shownFace: FaceMode = hasRear ? face : 'top';
+
   const exists = (id: string) => spec.controls.some((c) => c.id === id) || !!spec.meters?.some((m) => m.id === id) || (isSlotId(spec, id) && !!laid.layout?.placements[id]);
-  /** Which face a thing lives on; selecting it shows that face when only one is on screen. */
   const showFaceOf = (ids: string[]) => {
     const f = ids.length ? faceOf(laid.layout?.placements[ids[0]!]) : undefined;
-    if (f && face !== 'both' && face !== f) setFace(f);
+    if (f && shownFace !== 'both' && shownFace !== f) setFace(f);
   };
   const selected = sel.filter(exists);
   const selSet = new Set(selected);
-  const one = selected.length === 1 ? selected[0]! : undefined;
-  const control = spec.controls.find((c) => c.id === one);
-  const meter = spec.meters?.find((m) => m.id === one);
-  const addedMuxes = allocated.muxes.filter((m) => !spec.muxes.some((x) => x.id === m.id));
   const users = pinUsers(allocated);
 
+  // ---- what the check panel shows ----
   const layoutIssues = useMemo(() => validateLayout(laid), [laid]);
   const audioIssues = useMemo(() => validateAudio(spec), [spec]);
-  const allIssues = useMemo(() => {
-    const seen = new Set(issues.map((i) => i.severity + i.message));
-    // screw-hole cutouts are reported as "<id>#h0": point at the part itself
-    const fresh = [...layoutIssues, ...audioIssues].filter((i) => !seen.has(i.severity + i.message)).map((i) => (i.controlId?.includes('#') ? { ...i, controlId: i.controlId.split('#')[0] } : i));
-    return [...issues, ...fresh.filter((i, k) => fresh.findIndex((j) => j.severity === i.severity && j.message === i.message) === k)];
-  }, [issues, layoutIssues, audioIssues]);
-
-  const select = (ids: string[]) => {
-    setSel(ids);
-    setNote('');
+  const allIssues = useMemo(() => mergeIssues(total, issues, layoutIssues, audioIssues), [issues, layoutIssues, audioIssues, total]);
+  const errors = allIssues.filter((i) => i.severity === 'error').length;
+  const warnings = allIssues.filter((i) => i.severity === 'warning').length;
+  const notes = allIssues.length - errors - warnings;
+  // The issue list names parts by label: teach it the meters, rear plates and ports too, so "Go to" never shows an id.
+  const issueSpec = useMemo(() => {
+    const extra = Object.keys(laid.layout?.placements ?? {}).filter((id) => !allocated.controls.some((c) => c.id === id) && !allocated.meters?.some((m) => m.id === id));
+    const named = [...(allocated.meters ?? []).map((m) => ({ id: m.id, label: m.label })), ...extra.filter((id) => isSlotId(spec, id) || virtualPart(spec, id)).map((id) => ({ id, label: placedLabel(spec, id) }))];
+    return { ...allocated, controls: [...allocated.controls, ...(named as unknown as Control[])] };
+  }, [allocated, laid, spec]);
+  const flagFor = (id: string) => {
+    const s = allIssues.filter((i) => i.controlId === id).map((i) => i.severity);
+    return s.includes('error') ? 'error' : s.includes('warning') ? 'warning' : undefined;
   };
+
+  // ---- saying what happened ----
+  const say = (text: string, undoTo?: DeviceSpec) => {
+    if (notify) return notify(text, { undo: !!undoTo });
+    clearTimeout(toastTimer.current);
+    setToast({ text, undoTo, n: Date.now() });
+    toastTimer.current = setTimeout(() => setToast(undefined), 8000);
+  };
+  useEffect(() => () => clearTimeout(toastTimer.current), []);
+
+  const select = (ids: string[]) => setSel(ids);
+  const reveal = (id: string, fit = false) => setFocus((f) => ({ id, n: (f?.n ?? 0) + 1, fit }));
   const goTo = (id: string) => {
     select([id]);
     showFaceOf([id]);
-    setFocus((f) => ({ id, n: (f?.n ?? 0) + 1 }));
-  };
-  const add = (kind: Kind, lit = false) => {
-    let c = newControl(spec, kind);
-    if (lit) c = { ...c, part: 'button-led-12mm', led: { index: -1, color: '#ff2020' } } as Control;
-    commit({ ...spec, controls: [...spec.controls, c] });
-    goTo(c.id);
-  };
-  const addMeter = () => {
-    const m = newMeter(spec);
-    commit({ ...spec, meters: [...(spec.meters ?? []), m] });
-    goTo(m.id);
-  };
-  const remove = (all: string[]) => {
-    const ids = all.filter((id) => !isSlotId(spec, id)); // slots stay: they belong to the strip, not to the list of parts
-    if (!ids.length) return;
-    const order = [...spec.controls.map((c) => c.id), ...(spec.meters ?? []).map((m) => m.id)];
-    const next = removeItems(spec, ids);
-    const i = Math.min(...ids.map((id) => order.indexOf(id)));
-    const left = order.filter((id) => !ids.includes(id));
-    commit(next);
-    select(left[Math.min(i, left.length - 1)] ? [left[Math.min(i, left.length - 1)]!] : []);
-  };
-  const dotFor = (id: string) => {
-    const s = allIssues.filter((i) => i.controlId === id).map((i) => i.severity);
-    return s.includes('error') ? 'error' : s.includes('warning') ? 'warning' : undefined;
+    reveal(id);
   };
   const pick = (id: string, e: React.MouseEvent) => {
     const multi = e.shiftKey || e.metaKey || e.ctrlKey;
     select(multi ? (selSet.has(id) ? selected.filter((x) => x !== id) : [...selected, id]) : [id]);
     if (!multi) showFaceOf([id]);
+    setRail(false);
   };
 
-  // ---- control list: groups first, then loose items ----
-  const groups = spec.groups ?? [];
-  const inGroup = new Set(groups.flatMap((g) => g.members));
-  const loose = [...spec.controls.map((c) => c.id), ...(spec.meters ?? []).map((m) => m.id)].filter((id) => !inGroup.has(id));
-  // rear I/O: one row per channel slot, then the master output plates
-  const slotIds = [...(spec.ioSlots ?? []).map((s) => s.id), ...(spec.audio?.master.outputs ?? []).filter((m) => IO_MODULES[m]?.mount === 'slot').map((m) => `master:${m}`)];
-  const slotRow = (id: string) => {
-    const g = ownerOfSlot(spec, id);
-    const mod = IO_MODULES[id.startsWith('master:') ? id.slice(7) : spec.ioSlots?.find((s) => s.id === id)?.module ?? ''];
-    return (
-      <li key={id}>
-        <button className="row grouped" style={{ '--gc': g?.color } as React.CSSProperties} aria-current={selSet.has(id)} onClick={(e) => pick(id, e)}>
-          <span className="glyph slotplate" aria-hidden />
-          <span className="name">{g ? (id.startsWith('master:') ? 'Master out' : `${g.label} input`) : id}</span>
-          <span className="meta">{mod ? MODULE_SHORT[mod.id] ?? mod.name : 'blank plate'}</span>
-          <span className="pin">{mod ? `${mod.codecPorts} codec ${mod.direction === 'in' ? 'in' : 'out'}` : ''}</span>
-        </button>
-      </li>
-    );
-  };
-  const isOpen = (g: Group) => open[g.id] ?? (groups.length <= 3 || g.members.some((m) => selSet.has(m)));
-
-  const row = (id: string, g?: Group) => {
-    const c = allocated.controls.find((x) => x.id === id);
-    const m = allocated.meters?.find((x) => x.id === id);
-    if (!c && !m) return null;
-    const sev = dotFor(id);
-    const style = { '--gc': g?.color } as React.CSSProperties;
-    let name: string, meta: string, where: string;
-    if (c) {
-      name = labelOf(c);
-      meta = mapText(c);
-      where = c.kind !== 'encoder' && c.kind !== 'button' && c.mux ? `${c.mux.id} ch ${c.mux.channel}` : numbers(pinsOf(c)).map((n) => pinLabel(allocated.mcu, n).replace(/ \(.*\)/, '')).join(' + ') || (c.kind === 'button' && c.mux ? `${c.mux.id} ch ${c.mux.channel}` : 'no pin');
-    } else {
-      name = m!.label || m!.id;
-      meta = `CC ${m!.midi.cc} · ch ${m!.midi.channel}`;
-      where = m!.ledStart >= 0 ? `LED ${m!.ledStart}–${m!.ledStart + m!.ledCount - 1}` : 'LED chain';
+  // ---- adding and removing ----
+  const addMany = (list: [Kind, number, boolean?][], meters = 0) => {
+    let tmp = spec;
+    const parts: Control[] = [];
+    for (const [kind, n, lit] of list)
+      for (let i = 0; i < n; i++) {
+        let c = newControl(tmp, kind);
+        if (lit) c = { ...c, part: 'button-led-12mm', led: { index: -1, color: '#ff2020' } } as Control;
+        parts.push(c);
+        tmp = { ...tmp, controls: [...tmp.controls, c] };
+      }
+    const ms = [];
+    for (let i = 0; i < meters; i++) {
+      const m = newMeter(tmp);
+      ms.push(m);
+      tmp = { ...tmp, meters: [...(tmp.meters ?? []), m] };
     }
-    return (
-      <li key={id}>
-        <button className={`row${g ? ' grouped' : ''}`} style={style} aria-current={selSet.has(id)} onClick={(e) => pick(id, e)}>
-          {c ? <Glyph kind={c.kind} /> : <span className="glyph gauge" aria-hidden />}
-          <span className="name">{name}</span>
-          <span className="meta">{meta}</span>
-          <span className="pin">{where}</span>
-          {sev && <span className={`flag ${sev}`} title={sev} aria-label={`has ${sev}`} />}
-        </button>
-      </li>
-    );
+    // core lays the panel out again by itself while nothing has been moved by hand, so a run of knobs becomes a grid
+    commit({ ...spec, controls: tmp.controls, ...(ms.length && { meters: tmp.meters }) });
+    const ids = [...parts.map((c) => c.id), ...ms.map((m) => m.id)];
+    select(ids.length > 1 ? ids : ids.slice(-1));
+    reveal(ids.at(-1)!, ids.length > 1);
+    if (ids.length > 1) say(`Added ${ids.length} parts. They are selected, so you can group them as a strip.`, spec);
   };
-
-  // ---- inspector ----
-  const sameGroup = selected.length > 0 ? groupOf(spec, selected[0]!) : undefined;
-  const inOne = sameGroup && selected.every((id) => sameGroup.members.includes(id)) ? sameGroup : undefined; // everything selected sits in one group
-  const wholeGroup = inOne && inOne.members.length === selected.length;
-  const jumpToSlot = (slot: string) => {
+  const remove = (all: string[]) => {
+    const ids = all.filter((id) => !isSlotId(spec, id)); // slots stay: they belong to the strip, not to the list of parts
+    if (!ids.length) return;
+    const order = [...spec.controls.map((c) => c.id), ...(spec.meters ?? []).map((m) => m.id)];
+    const i = Math.min(...ids.map((id) => order.indexOf(id)));
+    const left = order.filter((id) => !ids.includes(id));
+    commit(removeItems(spec, ids));
+    select(left[Math.min(i, left.length - 1)] ? [left[Math.min(i, left.length - 1)]!] : []);
+    if (ids.length > 1) say(`Removed ${ids.length} parts.`, spec);
+  };
+  const onModuleChange = (next: DeviceSpec) => {
+    commit(next);
+    const d = describeSwap(spec, next);
+    if (!d) return;
+    say(d.text, spec);
+    setFlash((f) => ({ id: d.id, n: (f?.n ?? 0) + 1 }));
+    if (d.id.startsWith('master:')) select([d.id]);
+    reveal(d.id);
+  };
+  const goSlot = (slot: string) => {
     select([slot]);
     showFaceOf([slot]);
-    setFocus((f) => ({ id: slot, n: (f?.n ?? 0) + 1 }));
+    reveal(slot);
   };
-  const groupCard = (g: Group, compact: boolean) => {
-    const slot = g.kind === 'strip' ? slotOfGroup(spec, g.id) : undefined;
-    const mod = slot ? spec.ioSlots?.find((x) => x.id === slot)?.module : undefined;
-    const extra = compact && slot && mod ? <button className="btn" onClick={() => jumpToSlot(slot)} title="Choose what plugs into this channel">Input: {MODULE_SHORT[mod] ?? mod}</button> : undefined;
-    return <GroupPanel key={g.id} compact={compact} extra={extra} spec={spec} group={g} onChange={commit} onSelect={select} onReveal={(id) => setFocus((f) => ({ id, n: (f?.n ?? 0) + 1, fit: true }))} />;
-  };
-  const slotSel = one && isSlotId(spec, one) ? one : undefined;
-  const stripSlot = inOne && wholeGroup && inOne.kind === 'strip' ? slotOfGroup(spec, inOne.id) : undefined;
-  const pattern = one && stripInfo(spec, one);
-  const applyPattern = () => {
-    if (!one || !pattern) return;
-    commit(applyStripPattern(spec, one));
-    setNote(`Copied to the matching control in ${pattern.strips.length - 1} other strips.`);
-  };
-  const itemGroup = one ? groupOf(spec, one) : undefined;
+
+  const sheetLabel = selected.length === 0 ? 'Details' : selected.length > 1 ? `${selected.length} selected` : placedLabel(spec, selected[0]!);
+  const checkShown = checkOpen ?? errors > 0;
+  const summary = errors ? `${errors} to fix` : warnings ? `${warnings} to look at` : 'All clear';
+
+  // Escape closes the drawers
+  useEffect(() => {
+    const esc = (e: KeyboardEvent) => e.key === 'Escape' && (setRail(false), setSheet(false));
+    window.addEventListener('keydown', esc);
+    return () => window.removeEventListener('keydown', esc);
+  }, []);
 
   return (
-    <div className={`design${view === 'split' ? ' wide' : ''}`}>
-      <aside className="rack" aria-label="Controls">
-        <div className="card device">
-          <label htmlFor="devname" className="eyebrow">Name on your computer</label>
-          <input id="devname" value={spec.usbProductName} onChange={(e) => commit({ ...spec, usbProductName: e.target.value, name: e.target.value.replace(/^kont\.rolla\s*/i, '') || 'Controller' })} />
-          <label htmlFor="board" className="eyebrow">Board</label>
-          <select id="board" value={spec.mcu} onChange={(e) => commit(withMcu(spec, e.target.value as McuId))}>
-            {Object.values(MCUS).map((m) => <option key={m.id} value={m.id}>{m.name}</option>)}
-          </select>
-        </div>
-
-        <AudioBoardCard spec={spec} onChange={commit} />
-
-        <h2 className="eyebrow">Controls · {spec.controls.length + (spec.meters?.length ?? 0)}</h2>
-        {spec.controls.length + (spec.meters?.length ?? 0) === 0 && <p className="empty-note">Nothing here yet. Add a knob, fader, pad or encoder below.</p>}
-        <ul className="rows">
-          {groups.map((g) => (
-            <li key={g.id} className="gsec" style={{ '--gc': g.color ?? 'var(--dim)' } as React.CSSProperties}>
-              <div className="ghead">
-                <button type="button" className="gtoggle" aria-expanded={isOpen(g)} onClick={() => setOpen({ ...open, [g.id]: !isOpen(g) })}>
-                  <i className="gchip" aria-hidden />
-                  <span className="gname">{g.label}</span>
-                  <span className="gcount">{g.members.length}</span>
-                </button>
-                <button type="button" className="link" onClick={() => select(g.members)} aria-label={`Select all of ${g.label}`}>select</button>
-              </div>
-              {isOpen(g) && <ul className="rows">{g.members.map((id) => row(id, g))}</ul>}
-            </li>
-          ))}
-          {loose.map((id) => row(id))}
-        </ul>
-        {slotIds.length > 0 && (
-          <>
-            <h2 className="eyebrow">Rear I/O · {slotIds.length}</h2>
-            <ul className="rows">{slotIds.map(slotRow)}</ul>
-          </>
-        )}
-        {spec.audio && Object.values(IO_MODULES).filter((m) => m.direction === 'out' && m.mount === 'slot' && !spec.audio!.master.outputs.includes(m.id)).length > 0 && (
-          <div className="adders" role="group" aria-label="Add an output plate">
-            {Object.values(IO_MODULES).filter((m) => m.direction === 'out' && m.mount === 'slot' && !spec.audio!.master.outputs.includes(m.id)).map((m) => (
-              <button key={m.id} className="btn add" onClick={() => (commit(addMasterModule(spec, m.id)), select([`master:${m.id}`]))}><span className="glyph slotplate" aria-hidden />{MODULE_SHORT[m.id] ?? m.name}</button>
-            ))}
-          </div>
-        )}
-        <div className="adders" role="group" aria-label="Add a control">
-          {(Object.keys(KIND_INFO) as Kind[]).map((k) => (
-            <button key={k} className="btn add" onClick={() => add(k)}><Glyph kind={k} />{KIND_INFO[k].noun}</button>
-          ))}
-          <button className="btn add" onClick={() => add('button', true)}><span className="glyph lit" aria-hidden />Lit pad</button>
-          <button className="btn add" onClick={addMeter}><span className="glyph gauge" aria-hidden />Meter</button>
-        </div>
-        {addedMuxes.length > 0 && (
-          <p className="callout">
-            {MCUS[spec.mcu].name} has only {MCUS[spec.mcu].adcPins.length} analog inputs, so a 16-channel multiplexer ({addedMuxes.map((m) => m.id).join(', ')}) was added for you.
-          </p>
-        )}
-      </aside>
+    <div className={`dsg-root${drawer ? ' drawer-rack' : ''}${sheeted ? ' sheeted' : ''}`}>
+      <Rack
+        spec={spec}
+        allocated={allocated}
+        selected={selSet}
+        commit={commit}
+        onPick={pick}
+        onSelect={select}
+        flagFor={flagFor}
+        onAdd={(kind, lit, n) => addMany([[kind, n, lit]])}
+        onAddMeter={(n) => addMany([], n)}
+        onAddOutput={(id) => (commit(addMasterModule(spec, id)), select([`master:${id}`]))}
+        onSay={say}
+        drawer={drawer}
+        open={rail}
+        onClose={() => setRail(false)}
+      />
+      {rail && <button className="dsg-scrim" aria-label="Close the parts list" onClick={() => setRail(false)} />}
 
       <main className="dsg-stage">
-        {spec.controls.length + (spec.meters?.length ?? 0) > 0 && (
+        {total > 0 && <CoachTips />}
+        {total > 0 && (
           <div className="viewbar">
-            <div className="seg" role="group" aria-label="View">
+            <button type="button" className="btn dsg-railbtn" onClick={() => setRail(true)}>Parts</button>
+            <div className="seg" role="group" aria-label="What to show">
               {VIEWS.map((v) => (
-                <button key={v.id} type="button" aria-pressed={view === v.id} onClick={() => setView(v.id)}>{v.label}</button>
+                <button key={v.id} type="button" aria-pressed={view === v.id} title={v.id === 'split' ? 'The drawing and the 3D model side by side' : undefined} onClick={() => setView(v.id)}>{v.label}</button>
               ))}
             </div>
-            {view !== '3d' && (
-              <div className="seg" role="group" aria-label="Face">
+            {view !== '3d' && hasRear && (
+              <div className="seg" role="group" aria-label="Which side">
                 {FACES.map((f) => (
-                  <button key={f.id} type="button" aria-pressed={face === f.id} title={f.id === 'rear' ? 'The back wall: I/O slots, MIDI, USB, power' : f.id === 'both' ? 'Top and rear together' : 'The top panel'} onClick={() => setFace(f.id)}>{f.label}</button>
+                  <button key={f.id} type="button" aria-pressed={shownFace === f.id} title={f.id === 'rear' ? 'The back wall: input plates, MIDI, USB, power' : f.id === 'both' ? 'Top and rear together' : 'The top panel'} onClick={() => setFace(f.id)}>{f.label === 'Top' ? 'Top panel' : f.label === 'Rear' ? 'Rear wall' : 'Both sides'}</button>
                 ))}
               </div>
             )}
           </div>
         )}
-        {spec.controls.length + (spec.meters?.length ?? 0) > 0 && laid.layout && (
-          <div className={`views ${view} face-${face}`}>
-            {view !== '3d' && face !== 'rear' && <LayoutCanvas face="top" spec={laid} selected={selected} onSelect={select} onChange={commit} onRemove={remove} focus={focus} hot={hot} onHot={setHot} onFace={(f) => face !== 'both' && setFace(f)} />}
-            {view !== '3d' && face !== 'top' && <LayoutCanvas face="rear" spec={laid} selected={selected} onSelect={select} onChange={commit} onRemove={remove} focus={focus} hot={hot} onHot={setHot} onFace={(f) => face !== 'both' && setFace(f)} />}
+
+        {total > 0 && laid.layout ? (
+          <div className={`views ${view} face-${shownFace}`}>
+            {view !== '3d' && shownFace !== 'rear' && (
+              <LayoutCanvas face="top" spec={laid} selected={selected} onSelect={select} onChange={commit} onRemove={remove} focus={focus} hot={hot} onHot={setHot} onFace={(f) => shownFace !== 'both' && setFace(f)} onSay={say} flash={flash} />
+            )}
+            {view !== '3d' && shownFace !== 'top' && (
+              <LayoutCanvas face="rear" spec={laid} selected={selected} onSelect={select} onChange={commit} onRemove={remove} focus={focus} hot={hot} onHot={setHot} onFace={(f) => shownFace !== 'both' && setFace(f)} onSay={say} flash={flash} />
+            )}
             {view !== '2d' && (
               <Suspense fallback={<div className="v3 v3-fail">Loading the 3D model…</div>}>
                 <Viewport3D spec={model} selected={selected} onSelect={select} />
               </Suspense>
             )}
           </div>
+        ) : (
+          <section className="dsg-start" aria-label="Start your design">
+            <h2>What are you building?</h2>
+            <p>Pick a starting point and change anything later, or add parts one at a time from the Parts list.</p>
+            <div className="dsg-quick">
+              {QUICK.map((q) => (
+                <button key={q.label} className="btn big" onClick={() => addMany(q.parts)}>{q.label}</button>
+              ))}
+            </div>
+            <button className="btn ghost dsg-railbtn" onClick={() => setRail(true)}>Open the Parts list</button>
+          </section>
         )}
 
-        <div className="dsg-inspector">
-          {note && <p className="callout" role="status">{note}</p>}
-          {selected.length > 1 && !selected.some((id) => isSlotId(spec, id)) && (
-            <>
-              {inOne && groupCard(inOne, false)}
-              {stripSlot && <IoModuleCard spec={spec} slotId={stripSlot} onChange={commit} onSelect={select} />}
-              {!wholeGroup && <SelectionCard spec={spec} selected={selected} onChange={commit} onRemove={remove} />}
-            </>
-          )}
-          {slotSel && <IoModuleCard key={slotSel} spec={spec} slotId={slotSel} onChange={commit} onSelect={(ids) => (select(ids), showFaceOf(ids))} />}
-          {control && (
-            <>
-              {itemGroup && groupCard(itemGroup, true)}
-              <Editor
-                key={control.id}
-                control={control}
-                placed={allocated.controls.find((c) => c.id === control.id) ?? control}
-                allocated={allocated}
-                group={itemGroup}
-                strips={pattern || undefined}
-                onApplyPattern={applyPattern}
-                onChange={(c) => commit({ ...spec, controls: spec.controls.map((x) => (x.id === c.id ? c : x)) })}
-                onRemove={() => remove([control.id])}
-              />
-            </>
-          )}
-          {meter && (
-            <>
-              {itemGroup && groupCard(itemGroup, true)}
-              <MeterEditor
-                key={meter.id}
-                meter={meter}
-                placed={allocated.meters?.find((m) => m.id === meter.id) ?? meter}
-                group={itemGroup}
-                strips={pattern || undefined}
-                onApplyPattern={applyPattern}
-                onChange={(m) => commit({ ...spec, meters: spec.meters!.map((x) => (x.id === m.id ? m : x)) })}
-                onRemove={() => remove([meter.id])}
-              />
-            </>
-          )}
-          {one && !control && !meter && !slotSel && <p className="empty-note">This part has no settings of its own.</p>}
-          {selected.length === 0 && (
-            <div className="empty">
-              <h2>{spec.controls.length ? 'Pick something to edit' : 'Start with a control'}</h2>
-              <p>
-                {spec.controls.length
-                  ? 'Click a control on the panel or in the list. Drag a box round several to move, align or group them.'
-                  : 'Add a knob, fader, pad or meter from the list on the left. Pins are assigned for you as you go and the check on the right tells you if anything won’t work.'}
-              </p>
-            </div>
-          )}
-        </div>
-        <div className="next">
-          <button className="btn primary big" onClick={onNext} disabled={spec.controls.length === 0}>Test in the emulator</button>
+        <div className="dsg-bar">
+          <button type="button" className="btn dsg-sheetbtn" aria-expanded={sheet} onClick={() => setSheet((s) => !s)}>{sheetLabel} {sheet ? '▾' : '▴'}</button>
+          <span className={`dsg-state ${errors ? 'bad' : warnings ? 'tight' : 'ok'}`} role="status">
+            <i aria-hidden />
+            {total === 0 ? 'Nothing to check yet' : errors ? `${errors} ${errors === 1 ? 'problem' : 'problems'} to fix` : warnings ? `${warnings} to look at` : 'No problems'}
+          </span>
+          <button className="btn primary big" onClick={onNext} disabled={total === 0}>Test in the emulator →</button>
         </div>
       </main>
 
-      <aside className="check">
-        <Issues issues={allIssues} spec={allocated} onSelect={goTo} />
-        <section className="card pinmap" aria-label="Pin map">
-          <h2 className="eyebrow">Pin map · assigned automatically</h2>
+      <aside className={`dsg-side${sheet ? ' open' : ''}`} aria-label="Selection and checks">
+        <div className="dsg-sheet-head">
+          <h2>{sheetLabel}</h2>
+          <button type="button" className="btn ghost" onClick={() => setSheet(false)}>Close</button>
+        </div>
+        <section className="dsg-check" aria-label="Design check">
+          <button type="button" className={`dsg-check-btn ${errors ? 'bad' : warnings ? 'tight' : 'ok'}`} aria-expanded={checkShown} onClick={() => setCheckOpen(!checkShown)}>
+            <i aria-hidden />
+            <b>{summary}</b>
+            {notes > 0 && <span>{notes} {notes === 1 ? 'note' : 'notes'}</span>}
+            <em>{checkShown ? 'Hide' : 'Show'}</em>
+          </button>
+          {checkShown && <Issues issues={allIssues} spec={issueSpec} onSelect={(id) => (goTo(id), setSheet(true))} />}
+        </section>
+
+        <Inspector
+          spec={spec}
+          allocated={allocated}
+          selected={selected}
+          commit={commit}
+          onSelect={select}
+          onRemove={remove}
+          onSay={say}
+          onReveal={reveal}
+          onModuleChange={onModuleChange}
+          onGoSlot={goSlot}
+        />
+
+        <details className="dsg-pins">
+          <summary>Pin map <small>handed out for you</small></summary>
           {users.size === 0 ? <p className="empty-note">No pins used yet.</p> : (
             <ul>
               {[...users].sort((a, b) => a[0] - b[0]).map(([pin, who]) => (
@@ -395,8 +335,16 @@ export function Design({ spec, allocated, issues, setSpec, onNext, focusId }: Pr
               ))}
             </ul>
           )}
-        </section>
+        </details>
       </aside>
+
+      {toast && (
+        <div className="dsg-toast" role="status" key={toast.n}>
+          <p>{toast.text}</p>
+          {toast.undoTo && <button className="link" onClick={() => (commit(toast.undoTo!), setToast(undefined))}>Undo</button>}
+          <button className="link" aria-label="Dismiss" onClick={() => setToast(undefined)}>Dismiss</button>
+        </div>
+      )}
     </div>
   );
 }

@@ -1,5 +1,5 @@
 import { useId, useState } from 'react';
-import { createGroup, ungroup } from '@kontrolla/core';
+import { createGroup, groupOf, ungroup } from '@kontrolla/core';
 import type { DeviceSpec, Group } from '@kontrolla/core';
 import { NumInput } from '../fields';
 import { GROUP_COLORS, duplicateStrip, nameOf, nextGroupColor } from './ops';
@@ -14,11 +14,12 @@ interface GroupProps {
   onSelect: (ids: string[]) => void;
   onReveal: (id: string) => void;
   compact?: boolean; // one slim row, for when a single member is being edited below
+  onSay?: (text: string, undoTo?: DeviceSpec) => void;
   extra?: React.ReactNode; // more actions in the compact row
 }
 
 /** One group: select it, duplicate it ×N (the mixer-strip killer feature), rename, recolour, ungroup. */
-export function GroupPanel({ spec, group, onChange, onSelect, onReveal, compact, extra }: GroupProps) {
+export function GroupPanel({ spec, group, onChange, onSelect, onReveal, compact, extra, onSay }: GroupProps) {
   const [copies, setCopies] = useState(1);
   const [error, setError] = useState('');
   const id = useId();
@@ -28,6 +29,7 @@ export function GroupPanel({ spec, group, onChange, onSelect, onReveal, compact,
   const duplicate = () => {
     try {
       const next = duplicateStrip(spec, group.id, copies);
+      onSay?.(`Copied ${group.label} ${copies === 1 ? 'once' : `${copies} times`}. The copies took the next free MIDI numbers.`, spec);
       const at = next.groups!.findIndex((g) => g.id === group.id);
       const last = next.groups![at + copies];
       setError('');
@@ -49,14 +51,14 @@ export function GroupPanel({ spec, group, onChange, onSelect, onReveal, compact,
         <div className="gp-actions">
           {extra}
           <button className="btn" onClick={() => onSelect(group.members)}>Select all</button>
-          <button className="btn ghost danger" onClick={() => onChange(ungroup(spec, group.id))}>Ungroup</button>
+          <button className="btn ghost danger" onClick={() => (onChange(ungroup(spec, group.id)), onSay?.(`Ungrouped ${group.label}. Its parts stay where they are.`, spec))}>Ungroup</button>
         </div>
       </header>
 
       <div className="gp-dup">
         <label htmlFor={id}>Copies</label>
         <NumInput id={id} value={copies} min={1} max={11} onChange={setCopies} />
-        <button className="btn primary" onClick={duplicate}>Duplicate {noun(group)} ×{copies}</button>
+        <button className="btn" onClick={duplicate}>Duplicate {noun(group)} ×{copies}</button>
       </div>
       {!compact && <p className="help">Each copy counts its labels up (Ch 1 → Ch 2), takes the next free MIDI numbers and LEDs, and lands to the right of the last one.</p>}
       {error && <p className="callout warn" role="alert">{error}</p>}
@@ -96,19 +98,23 @@ interface SelProps {
   selected: string[];
   onChange: (s: DeviceSpec) => void;
   onRemove: (ids: string[]) => void;
+  onSay?: (text: string, undoTo?: DeviceSpec) => void;
 }
 
 /** Several things selected: put them together, or remove them. */
-export function SelectionCard({ spec, selected, onChange, onRemove }: SelProps) {
+export function SelectionCard({ spec, selected, onChange, onRemove, onSay }: SelProps) {
   const [label, setLabel] = useState('');
   const id = useId();
   const make = (kind: 'strip' | 'section') => {
     const n = (spec.groups ?? []).filter((g) => g.kind === kind).length + 1;
     const name = label.trim() || `${kind === 'strip' ? 'Strip' : 'Section'} ${n}`;
     onChange(createGroup(spec, name, selected, { kind, color: nextGroupColor(spec) }));
+    onSay?.(`Grouped ${selected.length} parts as ${name}.`, spec);
     setLabel('');
   };
-  const names = selected.slice(0, 6).map((s) => nameOf(spec, s));
+  // "Gain, Gain" tells nobody anything: when labels repeat, say which strip each belongs to
+  const raw = selected.map((s) => nameOf(spec, s));
+  const names = selected.slice(0, 6).map((s, i) => (raw.filter((n) => n === raw[i]).length > 1 && groupOf(spec, s) ? `${groupOf(spec, s)!.label} ${raw[i]}` : raw[i]!));
   return (
     <section className="gp sel-card" aria-label={`${selected.length} selected`}>
       <header>
@@ -125,7 +131,7 @@ export function SelectionCard({ spec, selected, onChange, onRemove }: SelProps) 
         <input id={id} value={label} placeholder="Strip 1" maxLength={24} onChange={(e) => setLabel(e.target.value)} />
       </div>
       <div className="gp-dup">
-        <button className="btn primary" onClick={() => make('strip')}>Group as strip</button>
+        <button className="btn" onClick={() => make('strip')}>Group as strip</button>
         <button className="btn" onClick={() => make('section')}>Group as section</button>
       </div>
       <p className="help">A strip is one channel's worth of controls, ready to copy. A section is any set that belongs together. Controls already in another group move over.</p>

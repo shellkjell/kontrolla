@@ -6,6 +6,7 @@ import { clamp } from '../fields';
 import { GRIDS, alignPlacements, distributePlacements, hits, r2, snapMove, snapTo, union } from './geometry';
 import type { Align, Guide, Pt, Rect } from './geometry';
 import { ModulePlate } from './ModuleArt';
+import { Pop } from './Pop';
 import { editLayout, moveAnnotation, newAnnotationId, withPlacements } from './ops';
 import { MODULE_SHORT, faceOf, flipRear, isSlotId, labelOf, moduleIdOf, ownerOfSlot, virtualPart } from './rear';
 import type { Face } from './rear';
@@ -35,6 +36,8 @@ interface Props {
   hot?: string | null; // strip / group id the pointer is over somewhere (top or rear), highlighted here too
   onHot?: (groupId: string | null) => void;
   onFace?: (f: Face) => void; // ask the page to show the other face (the "Ch n" link on the rear wall)
+  onSay?: (text: string, undoTo?: DeviceSpec) => void; // say what a bigger action just did, with a way back
+  flash?: { id: string; n: number }; // briefly highlight one part (a plate that was just swapped)
 }
 
 const TOOLS: { id: Tool; label: string; key: string; icon: ReactNode }[] = [
@@ -64,8 +67,24 @@ const NICE = [1, 2, 5, 10, 20, 50, 100];
 const meterColor = (i: number, n: number) => (i / n < 0.6 ? '#3f9f5f' : i / n < 0.85 ? '#c9a524' : '#cf4a3a');
 const KIND_NOUN: Record<string, string> = { pot: 'knob', fader: 'fader', button: 'button', encoder: 'encoder', meter: 'meter', slot: 'I/O slot', port: 'opening' };
 const REAR_TOOLS: Tool[] = ['select', 'hand'];
+const SKETCH: Tool[] = ['pen', 'text', 'rect', 'erase'];
+const KEYS: { k: string; d: string; top?: boolean }[] = [
+  { k: 'Click', d: 'Select a part' },
+  { k: 'Shift-click · drag a box', d: 'Select several' },
+  { k: 'Double-click', d: 'Select the whole strip or section' },
+  { k: 'Drag', d: 'Move; neighbours’ edges snap, Alt turns snapping off' },
+  { k: 'Arrow keys', d: 'Nudge by the grid step (Shift 10 mm, Alt 0.1 mm)' },
+  { k: 'Tab · Enter', d: 'Step through parts · select' },
+  { k: '⌘/Ctrl + scroll', d: 'Zoom' },
+  { k: 'Space + drag · H', d: 'Pan' },
+  { k: 'V', d: 'Select tool' },
+  { k: 'P · T · R · E', d: 'Pen, text, box, eraser', top: true },
+  { k: '0 · + · −', d: 'Fit · zoom in · zoom out' },
+  { k: 'Delete', d: 'Remove the selection' },
+  { k: '⌘/Ctrl + Z', d: 'Undo' },
+];
 
-export function LayoutCanvas({ spec: real, face = 'top', selected, onSelect, onChange: emitReal, onRemove, focus, hot, onHot, onFace }: Props) {
+export function LayoutCanvas({ spec: real, face = 'top', selected, onSelect, onChange: emitReal, onRemove, focus, hot, onHot, onFace, onSay, flash }: Props) {
   const rear = face === 'rear';
   const uid = useId().replace(/\W/g, ''); // two canvases can be on screen: ids for patterns / clips must not clash
   // The rear wall measures y UP from its bottom edge; the canvas draws on a mirrored copy and mirrors edits back.
@@ -89,6 +108,7 @@ export function LayoutCanvas({ spec: real, face = 'top', selected, onSelect, onC
   const [hands, setHands] = useState(false);
   const [drag, setDragState] = useState<Drag | null>(null);
   const [selAnn, setSelAnn] = useState<string | null>(null);
+  const [flashing, setFlashing] = useState<string | null>(null);
   const [textEdit, setTextEditState] = useState<TextEdit | null>(null);
   const setDrag = (d: Drag | null) => ((dragRef.current = d), setDragState(d));
   const setTextEdit = (t: TextEdit | null) => ((textRef.current = t), setTextEditState(t));
@@ -189,6 +209,13 @@ export function LayoutCanvas({ spec: real, face = 'top', selected, onSelect, onC
     if (!seen) setView((v) => ({ ...v, x: size.w / 2 - (b.x + b.w / 2) * v.k, y: size.h / 2 - (b.y + b.h / 2) * v.k }));
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [focus?.n]);
+
+  useEffect(() => {
+    if (!flash) return;
+    setFlashing(flash.id);
+    const t = setTimeout(() => setFlashing(null), 1600);
+    return () => clearTimeout(t);
+  }, [flash?.n]); // eslint-disable-line react-hooks/exhaustive-deps
 
   const toMm = (e: { clientX: number; clientY: number }): Pt => {
     const r = svgRef.current!.getBoundingClientRect();
@@ -441,6 +468,7 @@ export function LayoutCanvas({ spec: real, face = 'top', selected, onSelect, onC
   const fs = clamp(8 / k, 2.2, 3.6); // screen-constant-ish label size, in mm
   const W = L.panel.width;
   const tools = rear ? TOOLS.filter((t) => REAR_TOOLS.includes(t.id)) : TOOLS;
+  const sketching = SKETCH.includes(tool) ? TOOLS.find((t) => t.id === tool) : undefined;
   const dropMm = L.panel.frontHeight === undefined ? 0 : L.panel.height - L.panel.frontHeight;
   const panelDrag = drag?.t === 'panel' && rear ? (drag.d - drag.d0) * k : 0; // rear: top edge moves, bottom edge stays
   const ry = (y: number) => r2(rear ? D - y : y); // y as the spec states it (rear: up from the bottom)
@@ -480,47 +508,92 @@ export function LayoutCanvas({ spec: real, face = 'top', selected, onSelect, onC
     <section className={`lc${rear ? ' rear' : ''}`} aria-label={rear ? 'Rear wall layout' : 'Panel layout'}>
       <div className="lc-bar" role="toolbar" aria-label="Layout tools">
         <div className="seg" role="group" aria-label="Tool">
-          {tools.map((t) => (
+          {tools.filter((t) => t.id === 'select' || t.id === 'hand').map((t) => (
             <button key={t.id} type="button" aria-pressed={tool === t.id} aria-keyshortcuts={t.key} title={`${t.label} (${t.key})`} onClick={() => setTool(t.id)}>
               <Icon>{t.icon}</Icon>
               <span>{t.label}</span>
             </button>
           ))}
         </div>
-        <div className="seg" role="group" aria-label="Snap to grid">
-          {GRIDS.map((g) => (
-            <button key={g} type="button" aria-pressed={grid === g} title={g ? `Snap to ${g} mm` : 'No grid snapping (Alt while dragging does the same)'} onClick={() => setGrid(g)}>
-              {g ? `${g}` : 'Free'}
-            </button>
-          ))}
-          <span className="lc-unit" aria-hidden>mm</span>
-        </div>
-        {!rear && <button type="button" className="btn lc-btn" aria-pressed={hands} title="Show a palm-wide circle under the pointer to judge what one hand can reach" onClick={() => setHands((v) => !v)}>
-          <Icon><path d="M8 12V6a1.5 1.5 0 013 0v5m0-6a1.5 1.5 0 013 0v6m0-4a1.5 1.5 0 013 0v6.5a6 6 0 01-6 6h-.5a5.5 5.5 0 01-4.4-2.2L4.5 14a1.5 1.5 0 012.3-1.8L8 13.5" /></Icon>
-          Hands
-        </button>}
-        <div className="seg lc-align" role="group" aria-label="Align and distribute selection">
-          {ALIGNS.map((a) => (
-            <button key={a.id} type="button" disabled={selected.length < 2} title={a.label} aria-label={a.label} onClick={() => arrange(alignPlacements(selected, boxes, a.id))}>
-              <Icon><path d={a.d} /></Icon>
-            </button>
-          ))}
-          <button type="button" disabled={selected.length < 3} title="Space evenly across" aria-label="Distribute horizontally" onClick={() => arrange(distributePlacements(selected, boxes, 'x'))}>
-            <Icon><path d="M4 3v18M20 3v18M9 8h6v8H9z" /></Icon>
-          </button>
-          <button type="button" disabled={selected.length < 3} title="Space evenly down" aria-label="Distribute vertically" onClick={() => arrange(distributePlacements(selected, boxes, 'y'))}>
-            <Icon><path d="M3 4h18M3 20h18M8 9h8v6H8z" /></Icon>
-          </button>
-        </div>
-        <button type="button" className="btn lc-btn" title="Place everything again from the groups (undo with Ctrl/⌘ Z)" onClick={() => emitReal({ ...real, layout: autoLayout(real) })}>
-          Auto-arrange
-        </button>
+        {!rear && (
+          <Pop label={sketching ? sketching.label : 'Sketch'} icon={<Icon>{(sketching ?? TOOLS[2]!).icon}</Icon>} pressed={!!sketching} title="Draw notes on the panel: pen, text, boxes">
+            {(close) => (
+              <>
+                <div className="seg" role="group" aria-label="Sketch tool">
+                  {tools.filter((t) => SKETCH.includes(t.id)).map((t) => (
+                    <button key={t.id} type="button" aria-pressed={tool === t.id} aria-keyshortcuts={t.key} title={`${t.label} (${t.key})`} onClick={() => (setTool(tool === t.id ? 'select' : t.id), close())}>
+                      <Icon>{t.icon}</Icon>
+                      <span>{t.label}</span>
+                    </button>
+                  ))}
+                </div>
+                <p className="help">Marks are saved with the design and ignored when you build. Click the tool again to go back to Select.</p>
+              </>
+            )}
+          </Pop>
+        )}
+        <Pop label={grid ? `Snap ${grid} mm` : 'Snap off'} title="Grid snapping and the reach circle">
+          <div className="seg" role="group" aria-label="Snap to grid">
+            {GRIDS.map((g) => (
+              <button key={g} type="button" aria-pressed={grid === g} title={g ? `Snap to ${g} mm` : 'No grid snapping (holding Alt while dragging does the same)'} onClick={() => setGrid(g)}>
+                {g ? `${g} mm` : 'Off'}
+              </button>
+            ))}
+          </div>
+          {!rear && (
+            <label className="pop-check">
+              <input type="checkbox" checked={hands} onChange={(e) => setHands(e.target.checked)} />
+              <span>Show a hand’s reach<small>A palm-wide circle under the pointer, to check what one hand can reach.</small></span>
+            </label>
+          )}
+        </Pop>
+        <Pop label="Arrange" dot={selected.length > 1} title="Line up, space out, or lay everything out again">
+          {(close) => (
+            <>
+              <div className="pop-grid" role="group" aria-label="Align the selection">
+                {ALIGNS.map((a) => (
+                  <button key={a.id} type="button" className="btn" disabled={selected.length < 2} onClick={() => arrange(alignPlacements(selected, boxes, a.id))}>
+                    <Icon><path d={a.d} /></Icon>
+                    {a.label.replace('Align ', '')}
+                  </button>
+                ))}
+                <button type="button" className="btn" disabled={selected.length < 3} onClick={() => arrange(distributePlacements(selected, boxes, 'x'))}>
+                  <Icon><path d="M4 3v18M20 3v18M9 8h6v8H9z" /></Icon>
+                  Space across
+                </button>
+                <button type="button" className="btn" disabled={selected.length < 3} onClick={() => arrange(distributePlacements(selected, boxes, 'y'))}>
+                  <Icon><path d="M3 4h18M3 20h18M8 9h8v6H8z" /></Icon>
+                  Space down
+                </button>
+              </div>
+              {selected.length < 2 && <p className="help">Select two or more parts (Shift-click, or drag a box round them) to line them up.</p>}
+              <button
+                type="button"
+                className="btn"
+                onClick={() => {
+                  emitReal({ ...real, layout: autoLayout(real) });
+                  onSay?.(`Laid out ${items.length} parts again.`, real);
+                  close();
+                }}
+              >
+                Lay everything out again
+              </button>
+            </>
+          )}
+        </Pop>
         <span className="lc-spacer" />
         <div className="seg lc-zoom" role="group" aria-label="Zoom">
           <button type="button" aria-label="Zoom out" title="Zoom out (−)" onClick={() => zoomAt(0.8, size.w / 2, size.h / 2)}>−</button>
-          <button type="button" title="Fit panel to window (0)" onClick={fit}>{Math.round(k * 100)}%</button>
+          <button type="button" title="Fit the panel in the window (0)" onClick={fit}>{Math.round(k * 100)}%</button>
           <button type="button" aria-label="Zoom in" title="Zoom in (+)" onClick={() => zoomAt(1.25, size.w / 2, size.h / 2)}>+</button>
         </div>
+        <Pop label="Keys" align="end" title="Keyboard and mouse shortcuts for this view">
+          <dl className="pop-keys">
+            {KEYS.filter((r) => !rear || !r.top).map((r) => (
+              <div key={r.k}><dt>{r.k}</dt><dd>{r.d}</dd></div>
+            ))}
+          </dl>
+        </Pop>
       </div>
 
       <div ref={wrap} className="lc-wrap" tabIndex={-1} style={{ cursor }} onKeyDown={wrapKey} onKeyUp={(e) => e.key === ' ' && (spaceRef.current = false)} aria-describedby={`${uid}-help`}>
@@ -581,7 +654,7 @@ export function LayoutCanvas({ spec: real, face = 'top', selected, onSelect, onC
               return (
                 <g
                   key={it.id}
-                  className={`item k-${it.kind}${on ? ' sel' : ''}`}
+                  className={`item k-${it.kind}${on ? ' sel' : ''}${flashing === it.id ? ' flash' : ''}`}
                   data-id={it.id}
                   transform={`translate(${p.x} ${p.y})`}
                   tabIndex={0}
@@ -698,7 +771,7 @@ export function LayoutCanvas({ spec: real, face = 'top', selected, onSelect, onC
           <i aria-hidden />
           {problems.err ? `${problems.err} overlap${problems.err === 1 ? '' : 's'} or edge problem${problems.err === 1 ? '' : 's'}` : problems.warn ? `${problems.warn} tight spot${problems.warn === 1 ? '' : 's'}` : 'Fits comfortably'}
         </span>
-        <span className="lc-hint">Drag to move · Shift-click to add · ⌘/Ctrl + scroll to zoom · Alt = no snap</span>
+        <span className="lc-hint">Drag to move · Shift-click to select several · “Keys” lists every shortcut</span>
       </div>
     </section>
   );

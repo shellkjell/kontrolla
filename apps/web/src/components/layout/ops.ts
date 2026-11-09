@@ -1,7 +1,7 @@
 // Spec edits the Design page needs that core does not already provide. Pure: every function returns a new spec.
 import { autoLayout, bindStripAudio, boxOf, duplicateGroup, ensureLayout, groupBBox, nextFreeMidi } from '@kontrolla/core';
 import { boardUse, slotOfGroup } from './rear';
-import type { Annotation, DeviceSpec, Group, Layout, Meter, Placement } from '@kontrolla/core';
+import type { Annotation, DeviceSpec, Group, Issue, Layout, Meter, Placement } from '@kontrolla/core';
 
 export const GROUP_COLORS = ['#e05555', '#e08a3c', '#d4b83a', '#4caf6a', '#3c8fe0', '#9b6be0', '#d96fa8', '#5cc7c0'];
 export const nextGroupColor = (spec: DeviceSpec): string => GROUP_COLORS[(spec.groups?.length ?? 0) % GROUP_COLORS.length]!;
@@ -220,4 +220,15 @@ export function fitBoard(spec: DeviceSpec, board: string): DeviceSpec {
   const members = use.overflow.flatMap((id) => spec.groups?.find((g) => g.id === id)?.members ?? []);
   next = removeItems(next, members);
   return { ...next, layout: autoLayout(next) };
+}
+
+/** The issues the Design page shows: App's own plus the panel and audio checks, without repeats. An empty design has nothing to check yet. */
+export function mergeIssues(partCount: number, issues: Issue[], layoutIssues: Issue[], audioIssues: Issue[]): Issue[] {
+  if (partCount === 0) return [];
+  const seen = new Set(issues.map((i) => i.severity + i.message));
+  // screw-hole cutouts are reported as "<id>#h0": point at the part itself
+  const fresh = [...layoutIssues, ...audioIssues]
+    .filter((i) => !seen.has(i.severity + i.message))
+    .map((i) => (i.controlId?.includes('#') ? { ...i, controlId: i.controlId.split('#')[0] } : i));
+  return [...issues, ...fresh.filter((i, k) => fresh.findIndex((j) => j.severity === i.severity && j.message === i.message) === k)];
 }

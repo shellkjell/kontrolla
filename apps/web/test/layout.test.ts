@@ -2,8 +2,8 @@ import { expect, test } from 'bun:test';
 import { EXAMPLES, boxOf, duplicateGroup, validateLayout } from '@kontrolla/core';
 import { alignPlacements, distributePlacements, snapMove } from '../src/components/layout/geometry';
 import type { Rect } from '../src/components/layout/geometry';
-import { applyStripPattern, duplicateStrip, addMasterModule, fitBoard, removeItems, removeMasterModule, setBoard, stripInfo, swapMasterModule, swapModule } from '../src/components/layout/ops';
-import { boardUse, flipRear, ownerOfSlot } from '../src/components/layout/rear';
+import { applyStripPattern, duplicateStrip, addMasterModule, fitBoard, mergeIssues, removeItems, removeMasterModule, setBoard, stripInfo, swapMasterModule, swapModule } from '../src/components/layout/ops';
+import { boardUse, describeSwap, flipRear, ownerOfSlot } from '../src/components/layout/rear';
 
 const box = (x: number, y: number, w = 10, h = 10): Rect => ({ x, y, w, h });
 
@@ -121,4 +121,25 @@ test('duplicateStrip on an audio mixer gives the copy its own slot and channel, 
   const slotX = next.layout!.placements['ch4-io']!.x;
   expect(Math.abs(slotX - next.layout!.placements['ch4-fader']!.x)).toBeLessThan(20); // under its strip
   expect(validateLayout(next).filter((i) => i.severity === 'error')).toEqual([]);
+});
+
+test('describeSwap says what a swap did, with codec use and the A/B consequence', () => {
+  const src = EXAMPLES['mixer-6ch']!;
+  const next = swapModule(src, 'ch1-io', 'io-dual-xlr'); // ch1 has an A/B button; XLR modules have one input set
+  const d = describeSwap(src, next)!;
+  expect(d.id).toBe('ch1-io');
+  expect(d.text).toContain('Ch 1 now takes');
+  expect(d.text).toMatch(/\d+ of 12 codec inputs in use/);
+  if (src.audio!.channels.find((c) => c.id === 'ch1')!.bind.inputSelect) expect(d.text).toContain('A/B button now does nothing');
+  expect(describeSwap(src, src)).toBeUndefined();
+  const m = swapMasterModule(removeMasterModule(src, 'out-booth'), 'out-xlr-pair', 'out-booth');
+  expect(describeSwap(removeMasterModule(src, 'out-booth'), m)!.id).toBe('master:out-booth');
+});
+
+test('mergeIssues: empty design has nothing to check; repeats and screw-hole ids are cleaned up', () => {
+  const lay = [{ severity: 'error', message: 'Hole sticks out', controlId: 'ch1-io#h0' }, { severity: 'error', message: 'Hole sticks out', controlId: 'ch1-io#h1' }] as const;
+  expect(mergeIssues(0, [{ severity: 'info', message: 'Scan needs 0 µs' }], [...lay], [])).toEqual([]);
+  const out = mergeIssues(3, [{ severity: 'info', message: 'Scan needs 5 µs' }], [...lay], []);
+  expect(out.map((i) => i.controlId)).toEqual([undefined, 'ch1-io']); // the same message twice shows once, pointing at the part
+  expect(mergeIssues(3, [{ severity: 'error', message: 'Hole sticks out' }], [...lay], []).length).toBe(1); // already known to App
 });
