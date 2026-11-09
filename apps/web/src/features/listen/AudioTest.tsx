@@ -54,8 +54,7 @@ export function AudioTest({ spec, bench, rig, onRunning, disabled }: Props) {
     <section className="card autotest audiotest" aria-labelledby="at-audio-h">
       <header>
         <div>
-          <span className="eyebrow">Real audio, end to end</span>
-          <h2 id="at-audio-h">Audio auto-test</h2>
+          <h2 id="at-audio-h">Audio test</h2>
         </div>
         {running ? (
           <button className="btn" onClick={() => (abort.current = true)}>Stop</button>

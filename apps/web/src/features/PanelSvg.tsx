@@ -4,7 +4,7 @@ import type { DeviceSpec } from '@kontrolla/core';
 import { noteName } from '../midi';
 import { labelOf } from '../pins';
 
-const KIND_COLOR = { pot: '#d8a24a', encoder: '#d8a24a', fader: '#a9a08a', button: '#ff6a2b', meter: '#9cc27b' } as const;
+const KIND_COLOR = { pot: '#c4c8cc', encoder: '#c4c8cc', fader: '#8c9298', button: '#eceee9', meter: '#6fcf97' } as const;
 
 /**
  * Top view of the panel, 1 user unit = 1 mm. `thumb`: small card picture. `overlay`: labelled, for printing as a silkscreen

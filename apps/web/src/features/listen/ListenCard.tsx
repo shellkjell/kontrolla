@@ -31,8 +31,7 @@ export function ListenCard({ spec, bench, rig, stats, error, onPower, onPowerOff
     <section className="card listen" aria-labelledby="listen-h">
       <header>
         <div>
-          <span className="eyebrow">Real audio</span>
-          <h2 id="listen-h">Listen</h2>
+          <h2 id="listen-h">Audio</h2>
         </div>
         {rig ? <button className="btn" onClick={onPowerOff}>Power off</button> : <button className="btn primary big" onClick={onPower} disabled={!bench}>Power on the mixer</button>}
       </header>

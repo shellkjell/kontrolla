@@ -256,7 +256,7 @@ export function Design({ spec, allocated, issues, setSpec, onNext, focusId }: Pr
         {spec.controls.length + (spec.meters?.length ?? 0) === 0 && <p className="empty-note">Nothing here yet. Add a knob, fader, pad or encoder below.</p>}
         <ul className="rows">
           {groups.map((g) => (
-            <li key={g.id} className="gsec" style={{ '--gc': g.color ?? 'var(--brass)' } as React.CSSProperties}>
+            <li key={g.id} className="gsec" style={{ '--gc': g.color ?? 'var(--dim)' } as React.CSSProperties}>
               <div className="ghead">
                 <button type="button" className="gtoggle" aria-expanded={isOpen(g)} onClick={() => setOpen({ ...open, [g.id]: !isOpen(g) })}>
                   <i className="gchip" aria-hidden />
@@ -380,7 +380,7 @@ export function Design({ spec, allocated, issues, setSpec, onNext, focusId }: Pr
           )}
         </div>
         <div className="next">
-          <button className="btn primary big" onClick={onNext} disabled={spec.controls.length === 0}>Play it in the emulator →</button>
+          <button className="btn primary big" onClick={onNext} disabled={spec.controls.length === 0}>Test in the emulator</button>
         </div>
       </main>
 

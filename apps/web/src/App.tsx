@@ -178,7 +178,6 @@ export function App() {
             {STEPS.map((s, i) => (
               <li key={s.id}>
                 <button aria-current={step === s.id ? 'step' : undefined} disabled={!spec && s.id !== 'start'} onClick={() => go(s.id)}>
-                  <b>{i + 1}</b>
                   {s.label}
                   {s.id === 'design' && errors > 0 && <i className="badge" aria-label={`${errors} to fix`}>{errors}</i>}
                 </button>
@@ -194,7 +193,6 @@ export function App() {
         </div>
         <div className="chip">{spec ? `${spec.name} · ${MCUS[spec.mcu].name}` : 'No design yet'}</div>
       </header>
-      <div className="ruler" aria-hidden />
 
       {incoming && (
         <div className="banner" role="status">

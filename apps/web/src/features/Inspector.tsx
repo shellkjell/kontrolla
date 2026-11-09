@@ -18,7 +18,7 @@ export function Inspector({ spec, id, wiring, onEdit }: { spec: DeviceSpec; id?:
 
   return (
     <section className="card inspector" aria-label="Control inspector" aria-live="polite">
-      <span className="eyebrow">Inspector</span>
+      <h2 className="insp-title">Inspector</h2>
       {!c && !m ? (
         <p className="help">Touch any control on the panel to see what it sends and how it’s wired.</p>
       ) : (

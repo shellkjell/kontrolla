@@ -22,9 +22,8 @@
       "name": "@kontrolla/web",
       "version": "0.1.0",
       "dependencies": {
-        "@fontsource-variable/fraunces": "^5.3.0",
-        "@fontsource-variable/instrument-sans": "^5.3.0",
-        "@fontsource/ibm-plex-mono": "^5.3.0",
+        "@fontsource-variable/archivo": "^5.3.0",
+        "@fontsource-variable/overpass-mono": "^5.3.0",
         "@kontrolla/audio": "workspace:*",
         "@kontrolla/core": "workspace:*",
         "@kontrolla/emulator": "workspace:*",
@@ -72,11 +71,9 @@
     },
   },
   "packages": {
-    "@fontsource-variable/fraunces": ["@fontsource-variable/fraunces@5.3.0", "", {}, "sha512-9BYGySn4AHEJdgp9Z28tQ3X+laJMEOITXkQarZXeloWQZDq5oOvXJ3kDA8c7MGIfpogIaZfjrQBqmda8POOCKA=="],
+    "@fontsource-variable/archivo": ["@fontsource-variable/archivo@5.3.0", "", {}, "sha512-HogK8FJelrD1o7TlZlkIVtHgc20bO5PZRWE7mUeUTdMN055alznQV6/00J00IBeu8FQAH4s3zW9UJNvKExXf+g=="],
 
-    "@fontsource-variable/instrument-sans": ["@fontsource-variable/instrument-sans@5.3.0", "", {}, "sha512-u4gKbDBTNFGkg997tfQn3eHOhHuquWUFTRT/rwzuKtrxX5P2ekfs2x+LgBPP4P32+cC+vUwF1Cr+IdRoPQbrGw=="],
-
-    "@fontsource/ibm-plex-mono": ["@fontsource/ibm-plex-mono@5.3.0", "", {}, "sha512-eTgnZjZEGk1QtD3ZstF+Vclo2HLAni8YMy34/DxllwZvyz1lR/1RF/xTiAquOBO7MvqBx8D2Ig2WCPMVfdZu7Q=="],
+    "@fontsource-variable/overpass-mono": ["@fontsource-variable/overpass-mono@5.3.0", "", {}, "sha512-qtESPvSFvq7/v7lQIUUsIyDlFZEWapNF1eM9lkQUugO6pmgen0euJOIAMJLyjtGTtOHCbE7XOe2ym0Nh9ccR0w=="],
 
     "@julusian/midi": ["@julusian/midi@3.8.1", "", { "dependencies": { "node-addon-api": "^6.1.0", "pkg-prebuilds": "^1.1.0", "tslib": "^2.8.1" } }, "sha512-T+Ecn2pWTFu0G81PUa64Tk7yqzS6KlW61BKIaWVCBeXKXtXQ8ARgn6NcqmH6kABOM3FA8DV7XaPcw7VDBtgxKQ=="],
 

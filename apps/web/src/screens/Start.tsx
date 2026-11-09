@@ -66,35 +66,19 @@ export function Start({ mcu, setMcu, current, onPick, onContinue, onImport }: Pr
   );
   return (
     <div className="start">
-      <section className="hero">
-        <div>
-          <span className="eyebrow">A workbench for MIDI controllers</span>
-          <h1>Design it. <em>Play it.</em><br />Break it. Then build it.</h1>
-          <p>Pick parts we know work, get walked through every pin and wire, then try the finished device in an emulator, with noisy pots and bouncing buttons, before you spend a cent.</p>
-          {current && (
-            <button className="btn primary big" onClick={onContinue}>Continue “{current.name}” →</button>
-          )}
-        </div>
-        <svg className="dial-art" viewBox="0 0 220 220" aria-hidden>
-          {Array.from({ length: 41 }, (_, i) => {
-            const a = ((-135 + i * 6.75) * Math.PI) / 180;
-            const r2 = i % 5 === 0 ? 108 : 102;
-            return <line key={i} x1={110 + Math.sin(a) * 94} y1={110 - Math.cos(a) * 94} x2={110 + Math.sin(a) * r2} y2={110 - Math.cos(a) * r2} />;
-          })}
-          <circle cx="110" cy="110" r="74" className="body" />
-          <circle cx="110" cy="110" r="58" className="top" />
-          <g className="hand"><line x1="110" y1="110" x2="110" y2="62" /></g>
-        </svg>
-      </section>
-
+      <header className="intro">
+        <h1>Design a MIDI controller or mixer</h1>
+        <p>Choose a board and a starting layout. kont.rolla assigns the pins, runs the firmware in an emulator so you can test it, and produces the parts list, firmware, enclosure files and build steps.</p>
+        {current && <button className="btn primary big" onClick={onContinue}>Continue with “{current.name}”</button>}
+      </header>
       <section aria-labelledby="h-board">
-        <h2 id="h-board" className="sec"><span>1</span>Choose your board</h2>
+        <h2 id="h-board" className="sec"><span>01</span>Board</h2>
         <div className="cards two" role="radiogroup" aria-label="Board">
           {(Object.keys(BOARDS) as McuId[]).map((id, i) => {
             const b = BOARDS[id];
             return (
               <button key={id} role="radio" aria-checked={mcu === id} className={`card choice ${b.fidelity}`} style={{ '--i': i } as React.CSSProperties} onClick={() => setMcu(id)}>
-                <span className="eyebrow">{MCUS[id].name}</span>
+                <span className="title">{MCUS[id].name}</span>
                 <span className="fid"><span className="pulse" aria-hidden />{b.tag}</span>
                 <span className="line">{b.line}</span>
                 <span className="blurb">{b.blurb}</span>
@@ -105,8 +89,8 @@ export function Start({ mcu, setMcu, current, onPick, onContinue, onImport }: Pr
       </section>
 
       <section aria-labelledby="h-tpl">
-        <h2 id="h-tpl" className="sec"><span>2</span>Start from</h2>
-        <h3 className="subsec">Audio mixers <small>a real mixer: audio in, audio out, and the surface to run it</small></h3>
+        <h2 id="h-tpl" className="sec"><span>02</span>Starting point</h2>
+        <h3 className="subsec">Audio mixers <small>surface plus audio engine and I/O</small></h3>
         <div className="cards two mixers">
           {MIXERS.map((m) => templates.find((t) => t.id === m)!).map(({ id, spec, price, parts }, i) => {
             const board = AUDIO_BOARDS[spec.audio?.board ?? ''];

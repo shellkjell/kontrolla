@@ -228,8 +228,7 @@ export function Test({ spec, issues, patchControls, onBack, onEdit, onNext }: Pr
       <section className="bench-col">
         <div className="bar">
           <div>
-            <span className="eyebrow">Virtual front panel</span>
-            <h1 className="h-sm">Play it before you build it</h1>
+            <h1 className="h-sm">Virtual panel</h1>
           </div>
           {f && (
             <div className={`fidelity ${fidelity}`} title={f.line}>
@@ -255,8 +254,8 @@ export function Test({ spec, issues, patchControls, onBack, onEdit, onNext }: Pr
 
         <section className="card imperfect">
           <header>
-            <h2>Make it imperfect</h2>
-            <p>Real parts aren’t ideal. Turn these up to see what your device does on a bad day, then fix it in the design.</p>
+            <h2>Simulated faults</h2>
+            <p>Add noise and contact bounce to see how the design copes.</p>
           </header>
           <div className="dials">
             <Dial label="Pot noise" unit="counts" value={noise} max={64} onChange={setNoise} help="Random jitter on every reading of a knob or fader, on a 0–4095 scale. Cheap pots and long wires do this." />
@@ -279,8 +278,8 @@ export function Test({ spec, issues, patchControls, onBack, onEdit, onNext }: Pr
         </section>
 
         <div className="next">
-          <button className="btn ghost" onClick={onBack}>← Back to design</button>
-          <button className="btn primary big" onClick={onNext}>Get the parts and firmware →</button>
+          <button className="btn ghost" onClick={onBack}>Back to design</button>
+          <button className="btn primary big" onClick={onNext}>Parts and firmware</button>
         </div>
       </section>
 
@@ -355,7 +354,7 @@ function SendTo({ out }: { out: ReturnType<typeof useMidiOut> }) {
         : null;
   return (
     <section className="card sendto" aria-label="Send to a real MIDI port">
-      <h2>Hear it for real</h2>
+      <h2>MIDI output</h2>
       <p className="help">Optional. Forward the virtual device’s MIDI to your DAW or synth.</p>
       <div className="seg" role="group" aria-label="Destination">
         {([['off', 'Off'], ['webmidi', 'Browser MIDI'], ['helper', 'kont.rolla helper']] as const).map(([m, label]) => (

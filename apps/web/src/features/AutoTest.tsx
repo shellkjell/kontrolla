@@ -58,8 +58,7 @@ export function AutoTest({ bench, noise, bounce, fidelity, onRunning }: Props) {
     <section className="card autotest" aria-labelledby="at-h">
       <header>
         <div>
-          <span className="eyebrow">Check everything in one go</span>
-          <h2 id="at-h">Auto-test</h2>
+          <h2 id="at-h">Control test</h2>
         </div>
         {running ? (
           <button className="btn" onClick={() => (abort.current = true)}>Stop</button>

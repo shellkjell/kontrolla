@@ -1,34 +1,34 @@
-/* Design page additions: view switch, grouped control list, split layout. */
-.viewbar { display: flex; align-items: center; gap: 8px; margin-bottom: 12px; }
-.viewbar .seg { background: var(--card); }
+/* Design page: view switch, grouped control list, split layout. */
+.viewbar { display: flex; align-items: center; gap: 8px; margin-bottom: 10px; }
 .viewbar-sp { flex: 1; }
-.viewbar .btn.ghost { padding: 6px 10px; font-size: 13px; }
+.viewbar .btn.ghost { padding: 0 8px; font-size: 13px; }
 
-.views { display: grid; gap: 14px; margin-bottom: 18px; min-width: 0; }
+.views { display: grid; gap: 12px; margin-bottom: 16px; min-width: 0; }
 .views.split { grid-template-columns: repeat(2, minmax(0, 1fr)); }
 .dsg-inspector { display: flex; flex-direction: column; gap: 14px; min-width: 0; }
 
 /* split gives the stage two columns' worth of room; the check panel drops underneath */
 .design.wide { grid-template-columns: 250px minmax(0, 1fr); }
-.design.wide .check { grid-column: 1 / -1; position: static; max-height: none; display: grid; grid-template-columns: 1.4fr 1fr; align-items: start; }
+.design.wide .check { grid-column: 1 / -1; position: static; max-height: none; display: grid; grid-template-columns: 1.4fr 1fr; gap: 24px; align-items: start; }
 @media (max-width: 1100px) { .views.split { grid-template-columns: minmax(0, 1fr); } }
 
 /* grouped control list */
-.rows .gsec { margin-top: 6px; }
-.rows .gsec > .rows { margin: 2px 0 6px 8px; }
-.ghead { display: flex; align-items: center; gap: 6px; border-radius: 8px; background: var(--card); border: 1px solid var(--line); padding-right: 10px; }
-.gtoggle { flex: 1; min-width: 0; display: flex; align-items: center; gap: 10px; background: none; border: 0; padding: 8px 6px 8px 10px; text-align: left; }
-.gtoggle::after { content: '▸'; order: 5; color: var(--faint); font-size: 11px; transition: transform 0.15s; }
+.rows .gsec { margin-top: 8px; }
+.rows .gsec > .rows { margin: 0 0 4px 10px; }
+.ghead { display: flex; align-items: center; gap: 6px; border-bottom: 1px solid var(--ink); padding-right: 4px; }
+.gtoggle { flex: 1; min-width: 0; display: flex; align-items: center; gap: 8px; background: none; border: 0; padding: 5px 4px; text-align: left; }
+.gtoggle::after { content: '▸'; order: 5; color: var(--faint); font-size: 10px; transition: transform 0.1s; }
 .gtoggle[aria-expanded='true']::after { transform: rotate(90deg); }
-.gchip { flex: none; width: 12px; height: 12px; border-radius: 3px; background: var(--gc, var(--brass)); }
-.gname { flex: 1; min-width: 0; font-weight: 600; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-.gcount { font: 11.5px var(--mono); color: var(--faint); }
-.row.grouped { box-shadow: inset 3px 0 0 var(--gc, transparent); }
+.gchip { flex: none; width: 10px; height: 10px; border-radius: 1px; background: var(--gc, var(--dim)); }
+.gname { flex: 1; min-width: 0; font-weight: 650; font-size: 13px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.gcount { font: 11px var(--mono); color: var(--faint); }
+.row.grouped { box-shadow: inset 3px 0 0 var(--gc, transparent); padding-left: 10px; }
+.row.grouped[aria-current='true'] { box-shadow: inset 3px 0 0 var(--gc, transparent), inset 5px 0 0 var(--signal); }
 
-.glyph.gauge { width: 8px; height: 16px; margin: 0 3px; border-radius: 2px; background: linear-gradient(to top, var(--ok) 0 50%, var(--warn) 50% 75%, var(--err) 75%); }
-.glyph.lit { border-radius: 50%; background: var(--err); box-shadow: 0 0 8px 1px var(--err); }
+.glyph.gauge { width: 8px; height: 16px; margin: 0 3px; border-radius: 1px; background: linear-gradient(to top, var(--ok) 0 50%, var(--warn) 50% 75%, var(--err) 75%); }
+.glyph.lit { border-radius: 50%; background: var(--err); }
 
-.glyph.slotplate { width: 9px; height: 16px; margin: 0 2.5px; border-radius: 2px; background: #30343b; box-shadow: inset 0 0 0 1px #6c727a, inset 0 5px 0 -3px #b8bcc2, inset 0 -5px 0 -3px #b8bcc2; }
+.glyph.slotplate { width: 9px; height: 16px; margin: 0 2.5px; border-radius: 1px; background: #30343b; box-shadow: inset 0 0 0 1px #6c727a, inset 0 5px 0 -3px #b8bcc2, inset 0 -5px 0 -3px #b8bcc2; }
 
 /* top + rear canvases stacked; in split the 3D view takes the second column */
 .views.face-both { grid-template-columns: minmax(0, 1fr); }

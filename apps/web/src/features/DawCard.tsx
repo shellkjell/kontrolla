@@ -52,8 +52,7 @@ export function DawCard({ bench, spec, log, paused }: Props) {
     <section className="card daw" aria-labelledby="daw-h">
       <header>
         <div>
-          <span className="eyebrow">Both directions</span>
-          <h2 id="daw-h">Pretend DAW</h2>
+          <h2 id="daw-h">Simulated DAW</h2>
         </div>
         {play && <span className="rate"><b>{rate}</b> level msg/s</span>}
       </header>

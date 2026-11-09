@@ -24,15 +24,15 @@ export function Issues({ issues, spec, onSelect }: { issues: Issue[]; spec: Devi
   const sorted = [...issues].sort((a, b) => ORDER[a.severity] - ORDER[b.severity]);
   const tone = errors ? 'error' : warnings ? 'warning' : 'ok';
   const title = errors
-    ? `${errors} ${errors === 1 ? 'thing needs' : 'things need'} fixing`
+    ? `${errors} ${errors === 1 ? 'error' : 'errors'}${warnings ? `, ${warnings} to check` : ''}`
     : warnings
-      ? `Nearly there — ${warnings} to look at`
-      : 'All clear';
+      ? `${warnings} to check`
+      : 'No problems found';
   const sub = errors
-    ? 'The device won’t build until these are sorted. Each one says how.'
+    ? 'The design can’t be built until these are fixed.'
     : warnings
-      ? 'These won’t stop you, but they’re worth a look.'
-      : 'Pins, power and mappings all check out.';
+      ? 'These don’t block the build.'
+      : 'Pins, power and mappings check out.';
 
   return (
     <section className={`issues ${tone}`} aria-label="Design check" aria-live="polite">

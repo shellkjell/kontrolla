@@ -94,7 +94,6 @@ export function Build({ spec, issues, designId, onBack, onShare, onImport }: Pro
   return (
     <div className="build">
       <header className="page-head">
-        <span className="eyebrow">Build sheet</span>
         <h1>{spec.usbProductName}</h1>
         <p>
           {MCUS[spec.mcu].name} · {spec.controls.length} controls{meters ? ` · ${meters} meters` : ''}
@@ -109,7 +108,7 @@ export function Build({ spec, issues, designId, onBack, onShare, onImport }: Pro
       {board?.maturity === 'experimental' && (
         <div className="callout danger" role="note">
           <b>{board.name} is unproven.</b> {board.maturityNote} 
-          {board.sources[0] && <a href={board.sources[0]} target="_blank" rel="noreferrer">The PJRC forum thread ↗</a>}
+          {board.sources[0] && <a href={board.sources[0]} target="_blank" rel="noreferrer">The PJRC forum thread ↗</a>}{' '}
           A proven 3-channel mixer on one codec is on the Start page.
         </div>
       )}
@@ -298,7 +297,7 @@ export function Build({ spec, issues, designId, onBack, onShare, onImport }: Pro
         </div>
       </section>
 
-      <div className="next"><button className="btn ghost" onClick={onBack}>← Back to design</button></div>
+      <div className="next"><button className="btn ghost" onClick={onBack}>Back to design</button></div>
     </div>
   );
 }
