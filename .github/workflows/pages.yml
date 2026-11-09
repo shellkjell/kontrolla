@@ -1,0 +1,43 @@
+name: Test and deploy
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  pages: write
+  id-token: write
+
+concurrency:
+  group: pages
+  cancel-in-progress: true
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: oven-sh/setup-bun@v2
+      - run: sudo apt-get update -q && sudo apt-get install -yq libasound2-dev # apps/helper's MIDI binding, if no prebuild matches
+      - run: bun install --frozen-lockfile
+      - run: for p in packages/core packages/emulator packages/enclosure packages/audio apps/web; do bunx tsc --noEmit -p $p; done
+      - run: bun test --timeout 120000
+      - run: bunx vite build
+        working-directory: apps/web
+      - uses: actions/upload-pages-artifact@v3
+        with:
+          path: apps/web/dist
+
+  deploy:
+    if: github.ref == 'refs/heads/main'
+    needs: build
+    runs-on: ubuntu-latest
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    steps:
+      - id: deployment
+        uses: actions/deploy-pages@v4
